@@ -14,14 +14,21 @@ def agent_portrayal(agent):
     """
     agent_type = agent.__class__.__name__
     if agent_type == "Shelf":
-        color = "gray"
+        color = "black"
+        size = 60
     elif agent_type == "DropZone":
         color = "green"
+        size = 60
     elif agent_type == "WarehouseAgent":
         color = "blue"
+        size = 60
+    elif agent_type == "ShelfItem":
+        color = "orange"
+        size = 10
     else:
         color = "red"  # unexpected proxy type
-    return {"color": color, "r": 0.5}
+        size = 60
+    return {"color": color, "size": size}
 
 # Build the grid‐drawing component once
 space = make_space_component(agent_portrayal)
@@ -34,7 +41,11 @@ def Page():
     - Use Reset/Step/Play to see the blue WarehouseAgent wander.
     """
     # 1️⃣ Create the model instance with fixed dims
-    model_inst = WarehouseEnvModel(width=20, height=10)
+    model_inst = WarehouseEnvModel(width=30, 
+                                   height=25, 
+                                   shelf_density = 0.4,
+                                   shelf_edge_gap = 2,
+                                   aisle_interval = 5)
 
     # 2️⃣ Wrap it in Solara’s reactive system
     reactive_model = sl.reactive(model_inst)

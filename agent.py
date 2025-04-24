@@ -20,11 +20,20 @@ class WarehouseAgent(Agent):
     """
     def __init__(self, model):
         super().__init__(model)
+        self.state = "idle"
+        self.path  = []
+
     def step(self):
-        # Get non‐diagonal neighbors
-        neighbours = self.model.grid.get_neighborhood(
-            self.pos, moore=False, include_center=False
-        )
-        # Choose one at random and move there
-        new_pos = self.random.choice(neighbours)
-        self.model.grid.move_agent(self, new_pos)
+        if getattr(self, "path", None):
+            next_cell = self.path.pop(0)
+            self.model.grid.move_agent(self, next_cell)
+
+
+class ShelfItem(Agent):
+    """
+    A single item sitting on a shelf. Static.
+    """
+    def __init__(self, model):
+        super().__init__(model)
+    def step(self):
+        pass
