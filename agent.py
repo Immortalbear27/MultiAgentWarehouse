@@ -3,25 +3,28 @@
 from mesa import Agent
 
 class Shelf(Agent):
-    """
-    A static shelf in the warehouse. No behavior.
-    """
     def __init__(self, model):
-        # Calls Mesa.Agent.__init__, setting self.model and self.unique_id
         super().__init__(model)
-
     def step(self):
-        # Shelves do not act
-        pass
-
+        pass  # static
 
 class DropZone(Agent):
+    def __init__(self, model):
+        super().__init__(model)
+    def step(self):
+        pass  # static
+
+class WarehouseAgent(Agent):
     """
-    A static drop‑off zone in the warehouse. No behavior.
+    A simple warehouse robot: picks a random neighbor each step.
     """
     def __init__(self, model):
         super().__init__(model)
-
     def step(self):
-        # Drop zones do not act
-        pass
+        # Get non‐diagonal neighbors
+        neighbours = self.model.grid.get_neighborhood(
+            self.pos, moore=False, include_center=False
+        )
+        # Choose one at random and move there
+        new_pos = self.random.choice(neighbours)
+        self.model.grid.move_agent(self, new_pos)
