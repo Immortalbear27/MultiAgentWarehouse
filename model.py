@@ -3,6 +3,7 @@
 from mesa import Model
 from mesa.space import MultiGrid
 from mesa.time import SimultaneousActivation
+from mesa.datacollection import DataCollector
 from agent import Shelf, DropZone, WarehouseAgent, ShelfItem
 import heapq
 from collections import deque
@@ -27,6 +28,24 @@ class WarehouseEnvModel(Model):
         super().__init__(seed=seed)
         self.grid     = MultiGrid(width, height, torus=False)
         self.schedule = SimultaneousActivation(self)
+        
+        # 1️⃣ Counters for metrics
+        self.total_deliveries = 0        # throughput
+        self.total_steps = 0             # for energy proxy
+        self.collisions = 0              # collision count
+        self.congestion_accum = 0        # cumulative congestion
+        self.ticks = 0                   # for averaging
+
+        # 2️⃣ DataCollector reporters
+        self.datacollector = DataCollector(
+            model_reporters={
+                "Throughput":      lambda m: m.total_deliveries,
+                "AvgEnergy":       lambda m: (m.total_steps / max(1, len(m.schedule.agents))),
+                "Collisions":      lambda m: m.collisions,
+                "AvgCongestion":   lambda m: (m.congestion_accum / max(1, m.ticks)),
+                "PendingTasks":    lambda m: len(m.tasks),
+            }
+        )
 
         # Default static layout
         # Compute the Y-positions of each shelf row
@@ -90,8 +109,28 @@ class WarehouseEnvModel(Model):
         1) Move every agent one step along its current path.
         2) After they've moved, assign new pickup or drop‐off paths.
         """
+        
+        # 1) Reset per‐tick stats
+        cell_counts = {}  # to measure congestion (#agents per cell)
+        for cell_contents, (x, y) in self.grid.coord_iter():
+            count = len(cell_contents)
+            if count > 1:
+                cell_counts[(x,y)] = count
+        
         # ── 1) Advance agents ─────────────────────────
         self.schedule.step()
+        
+         # 3) Count collisions: any cell where >1 agent landed
+        #    (excluding Shelf/DropZone so only multiple robots count)
+        for (x,y), count in cell_counts.items():
+            # if two or more WarehouseAgent ended in same cell
+            agents_here = [a for a in self.grid.get_cell_list_contents([(x,y)])
+                           if isinstance(a, WarehouseAgent)]
+            if len(agents_here) > 1:
+                self.collisions += 1
+
+        # 4) Measure congestion this tick
+        self.congestion_accum += len(cell_counts)
 
         # ── 2) Centralised assignment ─────────────────
         for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
@@ -119,6 +158,11 @@ class WarehouseEnvModel(Model):
             # Phase 3: arrived at drop-off
             elif agent.state == "to_dropoff" and not agent.path:
                 agent.state = "idle"
+                self.total_deliveries += 1
+                
+        # 7) Finally, collect the data for this tick
+        self.ticks += 1
+        self.datacollector.collect(self)
     
     def compute_path(self, start, goal):
         """

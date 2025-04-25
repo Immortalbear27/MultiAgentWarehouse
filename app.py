@@ -1,7 +1,7 @@
 # app.py
 
 import solara as sl
-from mesa.visualization import SolaraViz, make_space_component
+from mesa.visualization import SolaraViz, make_space_component, make_plot_component
 from model import WarehouseEnvModel
 from agent import Shelf, DropZone, WarehouseAgent
 
@@ -33,6 +33,12 @@ def agent_portrayal(agent):
 # Build the grid‐drawing component once
 space = make_space_component(agent_portrayal)
 
+# Create a plot component for your metrics
+plot = make_plot_component(
+    ["Throughput", "Collisions", "PendingTasks", "AvgEnergy"],
+    backend="matplotlib"
+)
+
 @sl.component
 def Page():
     """
@@ -53,7 +59,7 @@ def Page():
     # 3️⃣ Pass it positionally to SolaraViz along with your space drawer
     return SolaraViz(
         reactive_model,  # must be an instance so .grid exists
-        [space],         # your grid component
+        [space, plot],         # your grid component
         name="Warehouse Layout",
         play_interval=500  # ms between steps
     )
