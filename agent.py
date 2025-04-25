@@ -27,9 +27,31 @@ class WarehouseAgent(Agent):
 
     def step(self):
         if self.path:
-            next_cell = self.path.pop(0)
+            next_cell = self.path[0]
+
+            # ——— Collision *anticipation* detection ——————————
+            occupants = self.model.grid.get_cell_list_contents([next_cell])
+            # anyone else about to occupy that cell?
+            blockers = [a for a in occupants if isinstance(a, WarehouseAgent) and a is not self]
+            if blockers:
+                # Count this as a collision attempt
+                self.model.collisions += 1
+
+                # (Optionally) only one of the colliding pair should increment:
+                # if self.unique_id < blockers[0].unique_id:
+                #     self.model.collisions += 1
+
+                # Now replan around the blocker
+                goal = (self.pickup_pos if self.state=="to_pickup" 
+                        else self.next_drop)
+                new_path = self.model.compute_path(self.pos, goal)
+                if new_path:
+                    self.path = new_path
+                return  # skip moving this tick
+
+            # ——— No blocker, so actually move ——————————
+            self.path.pop(0)
             self.model.grid.move_agent(self, next_cell)
-            # 1️⃣ energy use: count your move
             self.task_steps += 1
         # 2️⃣ detect delivery completion
         elif getattr(self, "state", None) == "to_dropoff":

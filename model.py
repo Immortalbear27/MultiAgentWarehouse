@@ -7,7 +7,7 @@ from mesa.datacollection import DataCollector
 from agent import Shelf, DropZone, WarehouseAgent, ShelfItem
 import heapq
 from collections import deque
-from agent import Shelf
+from agent import Shelf, WarehouseAgent
 
 class WarehouseEnvModel(Model):
     """
@@ -216,9 +216,12 @@ class WarehouseEnvModel(Model):
             for nbr in self.grid.get_neighborhood(current, moore=False, include_center=False):
                 if nbr in came_from:
                     continue
-                # **Only** skip shelf‐cells if *not* our destination
+                # Skip shelves unless it’s our goal
                 contents = self.grid.get_cell_list_contents([nbr])
                 if nbr != goal and any(isinstance(a, Shelf) for a in contents):
+                    continue
+                # ALSO skip other robots unless nbr==goal
+                if nbr != goal and any(isinstance(a, WarehouseAgent) for a in contents):
                     continue
                 came_from[nbr] = current
                 queue.append(nbr)
