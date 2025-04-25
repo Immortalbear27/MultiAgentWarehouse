@@ -23,6 +23,7 @@ class WarehouseEnvModel(Model):
         shelf_rows: int = 5,
         shelf_edge_gap: int = 1,
         aisle_interval: int = 5,
+        num_agents: int = 3,
         seed:         int = None
     ):
         super().__init__(seed=seed)
@@ -98,11 +99,12 @@ class WarehouseEnvModel(Model):
             dz = DropZone(self)
             self.grid.place_agent(dz, pos)
 
-        # Place one WarehouseAgent in a random empty cell
-        robot = WarehouseAgent(self)
-        self.schedule.add(robot)
-        x, y = self.random_empty_cell()
-        self.grid.place_agent(robot, (x, y))
+        # 1️⃣ Spawn multiple robots
+        for _ in range(num_agents):
+            robot = WarehouseAgent(self)
+            self.schedule.add(robot)
+            x, y = self.random_empty_cell()
+            self.grid.place_agent(robot, (x, y))
 
     def step(self):
         """

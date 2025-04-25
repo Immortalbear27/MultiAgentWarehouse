@@ -51,7 +51,8 @@ def Page():
                                    height=25, 
                                    shelf_density = 0.4,
                                    shelf_edge_gap = 2,
-                                   aisle_interval = 5)
+                                   aisle_interval = 5, 
+                                   num_agents = 4)
 
     # 2️⃣ Wrap it in Solara’s reactive system
     reactive_model = sl.reactive(model_inst)
