@@ -146,15 +146,31 @@ class WarehouseEnvModel(Model):
 
         # ── 2) Centralised assignment ─────────────────
         for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
-            # Phase 1: just finished moving and was 'idle' at start of tick?
+            # Phase 1: idle → assign pickup‐adjacent cell
             if getattr(agent, "state", None) in (None, "idle") and self.tasks:
-                # assign only the pickup leg
-                pickup, drop = self.tasks.pop(0)
-                agent.current_pickup = pickup
-                agent.next_drop = drop
-                agent.path = self.compute_path(agent.pos, pickup)
-                agent.state = "to_pickup"
-                # no movement this tick (they already moved above)
+                pickup_cell, drop_cell = self.tasks.pop(0)
+
+                # Find all 4-way neighbours of the shelf that are free
+                neighbours = self.grid.get_neighborhood(
+                    pickup_cell, moore=False, include_center=False
+                )
+                free_adj = [
+                    pos for pos in neighbours
+                    if not any(isinstance(a, Shelf) for a in self.grid.get_cell_list_contents([pos]))
+                ]
+                # Pick the nearest neighbour by path length
+                best_pos, best_path = None, None
+                for n in free_adj:
+                    p = self.compute_path(agent.pos, n)
+                    if best_path is None or len(p) < len(best_path):
+                        best_path, best_pos = p, n
+
+                # Store both positions on the agent
+                agent.current_pickup    = pickup_cell   # where the item lives
+                agent.pickup_pos        = best_pos      # where agent must stand
+                agent.next_drop         = drop_cell
+                agent.path              = best_path
+                agent.state             = "to_pickup"
         
             # Phase 2: arrived at pickup because path is now empty
             elif agent.state == "to_pickup" and not agent.path:
