@@ -36,11 +36,17 @@ class WarehouseEnvModel(Model):
         self.collisions = 0              # collision count
         self.congestion_accum = 0        # cumulative congestion
         self.ticks = 0                   # for averaging
+        self.total_task_steps = 0
+        self.total_deliveries = 0
 
         # 2️⃣ DataCollector reporters
         self.datacollector = DataCollector(
             model_reporters={
                 "Throughput":      lambda m: m.total_deliveries,
+                "AvgStepsPerDelivery":(
+                    lambda m: m.total_task_steps / m.total_deliveries
+                    if m.total_deliveries > 0 else 0
+                ),
                 "AvgEnergy":       lambda m: (m.total_steps / max(1, len(m.schedule.agents))),
                 "Collisions":      lambda m: m.collisions,
                 "AvgCongestion":   lambda m: (m.congestion_accum / max(1, m.ticks)),
@@ -122,17 +128,21 @@ class WarehouseEnvModel(Model):
         # ── 1) Advance agents ─────────────────────────
         self.schedule.step()
         
-         # 3) Count collisions: any cell where >1 agent landed
-        #    (excluding Shelf/DropZone so only multiple robots count)
-        for (x,y), count in cell_counts.items():
-            # if two or more WarehouseAgent ended in same cell
-            agents_here = [a for a in self.grid.get_cell_list_contents([(x,y)])
-                           if isinstance(a, WarehouseAgent)]
-            if len(agents_here) > 1:
-                self.collisions += 1
+        # Set up collision logic:
+        collisions_this_tick = 0
+        congested_cells = 0
+        
+        for contents, (x, y) in self.grid.coord_iter():
+            # pull out only your robots
+            robots_here = [a for a in contents if isinstance(a, WarehouseAgent)]
+            if len(robots_here) > 1:
+                collisions_this_tick += 1
+            if len(robots_here) >= 1:
+                congested_cells += 1
 
-        # 4) Measure congestion this tick
-        self.congestion_accum += len(cell_counts)
+        # update your accumulators
+        self.collisions      += collisions_this_tick
+        self.congestion_accum += congested_cells
 
         # ── 2) Centralised assignment ─────────────────
         for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
@@ -159,8 +169,14 @@ class WarehouseEnvModel(Model):
 
             # Phase 3: arrived at drop-off
             elif agent.state == "to_dropoff" and not agent.path:
-                agent.state = "idle"
-                self.total_deliveries += 1
+                # 1) record the steps that this agent took on its just-completed task
+                self.total_task_steps   += agent.task_steps
+                # 2) reset for the next one
+                agent.task_steps         = 0
+
+                # 3) mark delivery done
+                agent.state             = "idle"
+                self.total_deliveries  += 1
                 
         # 7) Finally, collect the data for this tick
         self.ticks += 1

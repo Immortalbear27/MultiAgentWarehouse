@@ -23,14 +23,14 @@ class WarehouseAgent(Agent):
         self.state = "idle"
         self.path  = []
         self.steps_taken = 0
+        self.task_steps = 0
 
     def step(self):
         if self.path:
             next_cell = self.path.pop(0)
             self.model.grid.move_agent(self, next_cell)
             # 1️⃣ energy use: count your move
-            self.steps_taken += 1
-            self.model.total_steps += 1
+            self.task_steps += 1
         # 2️⃣ detect delivery completion
         elif getattr(self, "state", None) == "to_dropoff":
             # when model.step() sees path empty again, it flips state→"idle"
