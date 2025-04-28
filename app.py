@@ -48,8 +48,7 @@ def Page():
     """
     # 1️⃣ Create the model instance with fixed dims
     model_inst = WarehouseEnvModel(width=30, 
-                                   height=25, 
-                                   shelf_density = 0.4,
+                                   height=25,
                                    shelf_edge_gap = 2,
                                    aisle_interval = 5, 
                                    num_agents = 8)

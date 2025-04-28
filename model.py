@@ -5,9 +5,7 @@ from mesa.space import MultiGrid
 from mesa.time import SimultaneousActivation
 from mesa.datacollection import DataCollector
 from agent import Shelf, DropZone, WarehouseAgent, ShelfItem
-import heapq
 from collections import deque
-from agent import Shelf, WarehouseAgent
 
 class WarehouseEnvModel(Model):
     """
@@ -19,27 +17,32 @@ class WarehouseEnvModel(Model):
         height: int = 30,
         shelf_coords: list[tuple[int,int]] = None,
         drop_coords:  list[tuple[int,int]] = None,
-        shelf_density: float = 0.3,
         shelf_rows: int = 5,
         shelf_edge_gap: int = 1,
         aisle_interval: int = 5,
         num_agents: int = 3,
+        strategy: str = "centralised",
         seed:         int = None
     ):
         super().__init__(seed=seed)
+        self.width = width
+        self.height = height
+        self.strategy = strategy
+        self.num_agents = num_agents
+        
+        # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
         self.schedule = SimultaneousActivation(self)
         
         # 1️⃣ Counters for metrics
-        self.total_deliveries = 0        # throughput
-        self.total_steps = 0             # for energy proxy
-        self.collisions = 0              # collision count
-        self.congestion_accum = 0        # cumulative congestion
-        self.ticks = 0                   # for averaging
-        self.total_task_steps = 0
-        self.total_deliveries = 0
+        self.total_deliveries = 0        # Amount of total deliveries made
+        self.collisions = 0              # Counter for collisions
+        self.congestion_accum = 0        # Cumulative congestion counter
+        self.ticks = 0                   # Used for averaging
+        self.total_task_steps = 0        # Counter for total steps taken for tasks
+        
 
-        # 2️⃣ DataCollector reporters
+        # DataCollector reporters:
         self.datacollector = DataCollector(
             model_reporters={
                 "Throughput":      lambda m: m.total_deliveries,
@@ -47,9 +50,7 @@ class WarehouseEnvModel(Model):
                     lambda m: m.total_task_steps / m.total_deliveries
                     if m.total_deliveries > 0 else 0
                 ),
-                "AvgEnergy":       lambda m: (m.total_steps / max(1, len(m.schedule.agents))),
                 "Collisions":      lambda m: m.collisions,
-                "AvgCongestion":   lambda m: (m.congestion_accum / max(1, m.ticks)),
                 "PendingTasks":    lambda m: len(m.tasks),
             }
         )
@@ -143,60 +144,74 @@ class WarehouseEnvModel(Model):
         # update your accumulators
         self.collisions      += collisions_this_tick
         self.congestion_accum += congested_cells
-
-        # ── 2) Centralised assignment ─────────────────
+        
+        # 3) Strategy‐specific assignment
+        if self.strategy == "centralised":
+            self.centralised_strategy()
+        elif self.strategy == "decentralised":
+            self.decentralised_strategy()
+        elif self.strategy == "swarm":
+            self.swarm_strategy()
+        else:
+            raise ValueError(f"Unknown strategy {self.strategy!r}")
+                
+        # 7) Finally, collect the data for this tick
+        self.ticks += 1
+        self.datacollector.collect(self)
+        
+    def centralised_strategy(self):
+        """
+        Three‐phase centralised task loop:
+          1) idle → pick next task & plan to stand adjacent to shelf
+          2) arrived at pickup adjacent cell → remove item & plan drop leg
+          3) arrived at drop zone → mark delivery, reset agent
+        """
         for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
-            # Phase 1: idle → assign pickup‐adjacent cell
+            # Phase 1: assign pickup if idle
             if getattr(agent, "state", None) in (None, "idle") and self.tasks:
                 pickup_cell, drop_cell = self.tasks.pop(0)
-
-                # Find all 4-way neighbours of the shelf that are free
+                # find free adjacent cells, pick closest
                 neighbours = self.grid.get_neighborhood(
                     pickup_cell, moore=False, include_center=False
                 )
                 free_adj = [
                     pos for pos in neighbours
-                    if not any(isinstance(a, Shelf) for a in self.grid.get_cell_list_contents([pos]))
+                    if not any(isinstance(x, Shelf)
+                               for x in self.grid.get_cell_list_contents([pos]))
                 ]
-                # Pick the nearest neighbour by path length
-                best_pos, best_path = None, None
+                best_path, best_pos = None, None
                 for n in free_adj:
                     p = self.compute_path(agent.pos, n)
                     if best_path is None or len(p) < len(best_path):
                         best_path, best_pos = p, n
 
-                # Store both positions on the agent
-                agent.current_pickup    = pickup_cell   # where the item lives
-                agent.pickup_pos        = best_pos      # where agent must stand
-                agent.next_drop         = drop_cell
-                agent.path              = best_path
-                agent.state             = "to_pickup"
-        
-            # Phase 2: arrived at pickup because path is now empty
+                agent.current_pickup = pickup_cell
+                agent.pickup_pos     = best_pos
+                agent.next_drop      = drop_cell
+                agent.path           = best_path
+                agent.state          = "to_pickup"
+
+            # Phase 2: arrived next to shelf, pick up & plan drop-off
             elif agent.state == "to_pickup" and not agent.path:
-                # remove the visual item
                 item = self.item_agents[agent.current_pickup].pop()
                 self.grid.remove_agent(item)
                 self.items[agent.current_pickup] -= 1
 
-                # assign only the drop leg
-                agent.path = self.compute_path(agent.pos, agent.next_drop)
+                agent.path  = self.compute_path(agent.pos, agent.next_drop)
                 agent.state = "to_dropoff"
 
-            # Phase 3: arrived at drop-off
+            # Phase 3: arrived at drop zone, count delivery & reset
             elif agent.state == "to_dropoff" and not agent.path:
-                # 1) record the steps that this agent took on its just-completed task
                 self.total_task_steps   += agent.task_steps
-                # 2) reset for the next one
                 agent.task_steps         = 0
-
-                # 3) mark delivery done
                 agent.state             = "idle"
                 self.total_deliveries  += 1
-                
-        # 7) Finally, collect the data for this tick
-        self.ticks += 1
-        self.datacollector.collect(self)
+    
+    def decentralised_strategy():
+        pass
+    
+    def swarm_strategy():
+        pass
     
     def compute_path(self, start, goal):
         """
