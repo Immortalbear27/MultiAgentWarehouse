@@ -6,6 +6,9 @@ from mesa.time import SimultaneousActivation
 from mesa.datacollection import DataCollector
 from agent import Shelf, DropZone, WarehouseAgent, ShelfItem
 from collections import deque
+import heapq
+from math import inf
+
 
 class WarehouseEnvModel(Model):
     """
@@ -172,49 +175,50 @@ class WarehouseEnvModel(Model):
 
     def step(self):
         """
-        1) Move every agent one step along its current path.
-        2) After they've moved, assign new pickup or drop‐off paths.
+        1) Advance all agents one step.
+        2) Update congestion & collision metrics.
+        3) Assign new tasks according to strategy.
+        4) Collect end-of-tick data.
         """
-        
-        # 1) Reset per‐tick stats
-        cell_counts = {}  # to measure congestion (#agents per cell)
-        for cell_contents, (x, y) in self.grid.coord_iter():
-            count = len(cell_contents)
-            if count > 1:
-                cell_counts[(x,y)] = count
-        
-        # ── 1) Advance agents ─────────────────────────
         self.schedule.step()
-        
-        # Set up collision logic:
-        collisions_this_tick = 0
-        congested_cells = 0
-        
-        for contents, (x, y) in self.grid.coord_iter():
-            # pull out only your robots
-            robots_here = [a for a in contents if isinstance(a, WarehouseAgent)]
-            if len(robots_here) > 1:
-                collisions_this_tick += 1
-            if len(robots_here) >= 1:
-                congested_cells += 1
+        self.update_congestion_metrics()
+        self.apply_strategy()
+        self.collect_tick_data()
 
-        # update your accumulators
-        self.collisions      += collisions_this_tick
-        self.congestion_accum += congested_cells
-        
-        # 3) Strategy‐specific assignment
-        if self.strategy == "centralised":
-            self.centralised_strategy()
-        elif self.strategy == "decentralised":
-            self.decentralised_strategy()
-        elif self.strategy == "swarm":
-            self.swarm_strategy()
-        else:
+    def update_congestion_metrics(self):
+        """
+        Count cells with ≥1 robot (for congestion) and >1 robot
+        (for collisions), then update accumulators.
+        """
+        collisions = 0
+        congested = 0
+        for contents, _ in self.grid.coord_iter():
+            robots = [a for a in contents if isinstance(a, WarehouseAgent)]
+            if len(robots) > 1:
+                collisions += 1
+            if robots:
+                congested += 1
+
+        self.collisions      += collisions
+        self.congestion_accum += congested
+
+    def apply_strategy(self):
+        """
+        Dispatch to the correct strategy method, or error if unknown.
+        """
+        try:
+            strategy_fn = getattr(self, f"{self.strategy}_strategy")
+        except AttributeError:
             raise ValueError(f"Unknown strategy {self.strategy!r}")
-                
-        # 7) Finally, collect the data for this tick
+        strategy_fn()
+
+    def collect_tick_data(self):
+        """
+        Increment tick count and collect the model’s data.
+        """
         self.ticks += 1
         self.datacollector.collect(self)
+
         
     def centralised_strategy(self):
         """
