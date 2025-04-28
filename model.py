@@ -61,27 +61,16 @@ class WarehouseEnvModel(Model):
             int(round((i+1) * height / (shelf_rows+1)))
             for i in range(shelf_rows)
         ]
-
-        # Build shelf coordinates with edge gaps and optional internal aisles
-        shelf_coords = []
-        for y in row_positions:
-            for x in range(shelf_edge_gap, width - shelf_edge_gap):
-                # if aisle_interval is set, skip every Nth column
-                if aisle_interval and ((x - shelf_edge_gap) % aisle_interval == 0):
-                    continue
-                shelf_coords.append((x, y))
         
-        if drop_coords is None:
-            drop_coords = [(0, 0), (width - 1, height - 1)]
-
-        # Place static agents
-        for pos in shelf_coords:
-            s = Shelf(self)
-            self.grid.place_agent(s, pos)
+        # Initialise the shelf agents:
+        self.shelf_coords = self.create_shelves(row_positions, shelf_edge_gap, aisle_interval)
+        
+        # Initialise the drop zone agents:
+        self.drop_coords = self.create_drop_zones(drop_coords)
             
         # 5️⃣ Initialize items: 1 item per shelf cell
         #    You could later vary this per-shelf or have multiple items.
-        self.items = { pos: 1 for pos in shelf_coords }
+        self.items = { pos: 1 for pos in self.shelf_coords}
         self.item_agents = {}  # map pos → list of item‐agents
 
         for pos, count in self.items.items():
@@ -94,15 +83,15 @@ class WarehouseEnvModel(Model):
         # 6️⃣ Build initial task list: (pickup_pos, random_drop_pos)
         #    One task per item, with drop randomly chosen
         self.tasks = []
-        for pickup in shelf_coords:
+        for pickup in self.shelf_coords:
             for _ in range(self.items[pickup]):
-                drop = self.random.choice(drop_coords)
+                drop = self.random.choice(self.drop_coords)
                 self.tasks.append((pickup, drop))
 
         # Shuffle so tasks come in random order
         self.random.shuffle(self.tasks)
 
-        for pos in drop_coords:
+        for pos in self.drop_coords:
             dz = DropZone(self)
             self.grid.place_agent(dz, pos)
 
@@ -112,6 +101,42 @@ class WarehouseEnvModel(Model):
             self.schedule.add(robot)
             x, y = self.random_empty_cell()
             self.grid.place_agent(robot, (x, y))
+
+    def create_shelves(
+        self,
+        row_positions: list[int],
+        shelf_edge_gap: int,
+        aisle_interval: int
+    ) -> list[tuple[int,int]]:
+        """
+        Build shelf coordinates with the given edge-gap and aisle-interval,
+        place Shelf agents there, and return the coord list.
+        """
+        x0, x1 = shelf_edge_gap, self.width - shelf_edge_gap
+        coords = [
+            (x, y)
+            for y in row_positions
+            for x in range(x0, x1)
+            if not (aisle_interval and (x - x0) % aisle_interval == 0)
+        ]
+        for pos in coords:
+            self.grid.place_agent(Shelf(self), pos)
+        return coords
+    
+    def create_drop_zones(
+        self,
+        drop_coords: list[tuple[int,int]] | None
+    ) -> list[tuple[int,int]]:
+        """
+        Default to the two corners if none provided, place DropZone agents,
+        and return the coord list.
+        """
+        if drop_coords is None:
+            drop_coords = [(0, 0), (self.width - 1, self.height - 1)]
+        for pos in drop_coords:
+            self.grid.place_agent(DropZone(self), pos)
+        return drop_coords
+
 
     def step(self):
         """
