@@ -55,6 +55,16 @@ def Page():
 
     # 2️⃣ Wrap it in Solara’s reactive system
     reactive_model = sl.reactive(model_inst)
+    
+    # Test Code for Sliders:
+    num_agents = sl.slider(1, 20, value = 8, step = 1, label = "Number of Agents")
+    width = sl.slider(10, 60, value = 30, label = "Warehouse Width")
+    height = sl.slider(10, 60, value = 25, label = "Warehouse Height")
+    strategy = sl.select(
+        options = ["centralised", "decentralised", "swarm"],
+        value = "centralised",
+        label = "Coordination Strategy"
+    )
 
     # 3️⃣ Pass it positionally to SolaraViz along with your space drawer
     return SolaraViz(

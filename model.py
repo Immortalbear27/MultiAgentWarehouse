@@ -274,41 +274,60 @@ class WarehouseEnvModel(Model):
     def swarm_strategy():
         pass
     
-    def compute_path(self, start, goal):
+    def _heuristic(self, a: tuple[int,int], b: tuple[int,int]) -> int:
+        """Manhattan distance on a 4-way grid."""
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def _is_passable(self, cell: tuple[int,int], goal: tuple[int,int]) -> bool:
         """
-        BFS on the 4-way grid, allowing movement *onto* the goal even if it
-        has a Shelf agent. All other Shelf‐cells remain blocked.
+        Returns True if `cell` is free to move into.
+        Blocks shelves and other robots, except if `cell == goal`.
+        """
+        if cell == goal:
+            return True
+        for obj in self.grid.get_cell_list_contents([cell]):
+            if isinstance(obj, (Shelf, WarehouseAgent)):
+                return False
+        return True
+
+    def compute_path(
+        self,
+        start: tuple[int,int],
+        goal:  tuple[int,int]
+    ) -> list[tuple[int,int]]:
+        """
+        A* search from start to goal, avoiding shelves & robots
+        (except at the goal). Returns list of coords, excluding start.
         """
         if start == goal:
             return []
 
-        queue = deque([start])
-        came_from = {start: None}
+        open_set = [(self._heuristic(start, goal), start)]
+        came_from: dict[tuple[int,int], tuple[int,int]] = {}
+        g_score = {start: 0}
 
-        while queue:
-            current = queue.popleft()
+        while open_set:
+            f_current, current = heapq.heappop(open_set)
             if current == goal:
                 break
+
             for nbr in self.grid.get_neighborhood(current, moore=False, include_center=False):
-                if nbr in came_from:
+                if not self._is_passable(nbr, goal):
                     continue
-                # Skip shelves unless it’s our goal
-                contents = self.grid.get_cell_list_contents([nbr])
-                if nbr != goal and any(isinstance(a, Shelf) for a in contents):
-                    continue
-                # ALSO skip other robots unless nbr==goal
-                if nbr != goal and any(isinstance(a, WarehouseAgent) for a in contents):
-                    continue
-                came_from[nbr] = current
-                queue.append(nbr)
 
-        # If we never reached the goal, return empty path
-        if goal not in came_from:
-            return []
+                tentative_g = g_score[current] + 1
+                if tentative_g < g_score.get(nbr, inf):
+                    came_from[nbr] = current
+                    g_score[nbr] = tentative_g
+                    f_score = tentative_g + self._heuristic(nbr, goal)
+                    heapq.heappush(open_set, (f_score, nbr))
 
-        # Reconstruct the path (excluding start)
-        path = []
+        # Reconstruct path
+        path: list[tuple[int,int]] = []
         node = goal
+        if node not in came_from and node != start:
+            return []   # no path found
+
         while node != start:
             path.append(node)
             node = came_from[node]
