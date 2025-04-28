@@ -68,25 +68,12 @@ class WarehouseEnvModel(Model):
         # Initialise the drop zone agents:
         self.drop_coords = self.create_drop_zones(drop_coords)
             
-        # 5️⃣ Initialize items: 1 item per shelf cell
-        #    You could later vary this per-shelf or have multiple items.
-        self.items = { pos: 1 for pos in self.shelf_coords}
-        self.item_agents = {}  # map pos → list of item‐agents
-
-        for pos, count in self.items.items():
-            self.item_agents[pos] = []
-            for _ in range(count):
-                item = ShelfItem(self)
-                self.grid.place_agent(item, pos)
-                self.item_agents[pos].append(item)
+        # 5️⃣ Initialize items: 1 item per shelf cell:        
+        self.items, self.item_agents = self.create_items(self.shelf_coords)
 
         # 6️⃣ Build initial task list: (pickup_pos, random_drop_pos)
         #    One task per item, with drop randomly chosen
-        self.tasks = []
-        for pickup in self.shelf_coords:
-            for _ in range(self.items[pickup]):
-                drop = self.random.choice(self.drop_coords)
-                self.tasks.append((pickup, drop))
+        self.tasks = self.create_tasks()
 
         # Shuffle so tasks come in random order
         self.random.shuffle(self.tasks)
@@ -96,11 +83,34 @@ class WarehouseEnvModel(Model):
             self.grid.place_agent(dz, pos)
 
         # 1️⃣ Spawn multiple robots
+        self.robots = self.spawn_robots(self.num_agents)
+
+    def spawn_robots(self, num_agents: int) -> list[WarehouseAgent]:
+        """
+        Create `num_agents` WarehouseAgent instances, add each to the
+        scheduler, place it in a random empty cell, and return the list.
+        """
+        robots: list[WarehouseAgent] = []
         for _ in range(num_agents):
             robot = WarehouseAgent(self)
             self.schedule.add(robot)
             x, y = self.random_empty_cell()
             self.grid.place_agent(robot, (x, y))
+            robots.append(robot)
+        return robots
+
+    def create_tasks(self) -> list[tuple[int,int]]:
+        """
+        Build one (pickup, drop) tuple per item, choosing
+        a random drop-zone for each, then shuffle.
+        """
+        tasks = [
+            (pickup, self.random.choice(self.drop_coords))
+            for pickup, count in self.items.items()
+            for _ in range(count)
+        ]
+        self.random.shuffle(tasks)
+        return tasks
 
     def create_shelves(
         self,
@@ -137,6 +147,28 @@ class WarehouseEnvModel(Model):
             self.grid.place_agent(DropZone(self), pos)
         return drop_coords
 
+    def create_items(
+        self,
+        shelf_coords: list[tuple[int,int]],
+        default_count: int = 1
+    ) -> tuple[dict[tuple[int,int],int], dict[tuple[int,int], list]]:
+        """
+        For each shelf cell:
+          1) set its item‐count in self.items,
+          2) place that many ShelfItem agents,
+          3) record them in self.item_agents.
+        Returns (items, item_agents).
+        """
+        items = {pos: default_count for pos in shelf_coords}
+        item_agents: dict[tuple[int,int], list] = {}
+        for pos, count in items.items():
+            agents: list = []
+            for _ in range(count):
+                item = ShelfItem(self)
+                self.grid.place_agent(item, pos)
+                agents.append(item)
+            item_agents[pos] = agents
+        return items, item_agents
 
     def step(self):
         """
