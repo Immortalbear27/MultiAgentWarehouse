@@ -268,10 +268,70 @@ class WarehouseEnvModel(Model):
                 agent.state             = "idle"
                 self.total_deliveries  += 1
     
-    def decentralised_strategy():
-        pass
+    def decentralised_strategy(self):
+        """
+        Each idle robot picks its closest outstanding task,
+        then proceeds: move to pickup, then to dropoff.
+        """
+        agents = [a for a in self.schedule.agents
+                  if isinstance(a, WarehouseAgent)]
+        for agent in agents:
+            # ── Phase 1: idle robots claim nearest task ────────────
+            if getattr(agent, "state", None) in (None, "idle") and self.tasks:
+                # find (index, (pickup,drop)) with minimum Manhattan distance
+                best_idx, (best_pickup, best_drop) = min(
+                    enumerate(self.tasks),
+                    key=lambda item: (
+                        abs(agent.pos[0] - item[1][0][0]) +
+                        abs(agent.pos[1] - item[1][0][1])
+                    )
+                )
+                # remove that task
+                self.tasks.pop(best_idx)
+
+                # choose a free adjacent cell to the pickup
+                neighbours = self.grid.get_neighborhood(
+                    best_pickup, moore=False, include_center=False
+                )
+                free_adj = [
+                    pos for pos in neighbours
+                    if not any(isinstance(x, Shelf)
+                               for x in self.grid.get_cell_list_contents([pos]))
+                ]
+                # pick the one closest to the agent by straight-line distance
+                best_adj = min(
+                    free_adj,
+                    key=lambda pos: abs(agent.pos[0] - pos[0]) +
+                                    abs(agent.pos[1] - pos[1])
+                )
+
+                # assign the task
+                agent.current_pickup = best_pickup
+                agent.pickup_pos     = best_adj
+                agent.next_drop      = best_drop
+                agent.path           = self.compute_path(agent.pos, best_adj)
+                agent.state          = "to_pickup"
+
+            # ── Phase 2: arrived at shelf, pick & plan dropoff ─────
+            elif agent.state == "to_pickup" and not agent.path:
+                # remove one item
+                item = self.item_agents[agent.current_pickup].pop()
+                self.grid.remove_agent(item)
+                self.items[agent.current_pickup] -= 1
+
+                # plan path to drop zone
+                agent.path  = self.compute_path(agent.pos, agent.next_drop)
+                agent.state = "to_dropoff"
+
+            # ── Phase 3: arrived at drop, record & reset ──────────
+            elif agent.state == "to_dropoff" and not agent.path:
+                self.total_task_steps  += agent.task_steps
+                agent.task_steps        = 0
+                agent.state             = "idle"
+                self.total_deliveries  += 1
+
     
-    def swarm_strategy():
+    def swarm_strategy(self):
         pass
     
     def _heuristic(self, a: tuple[int,int], b: tuple[int,int]) -> int:
