@@ -284,10 +284,10 @@ class WarehouseEnvModel(Model):
         """
         1) Optimal assignment of idle agents → pickup‐adjacent cell (with congestion penalty).
         2) Phase 2: when agent arrives at pickup, remove item & plan drop leg.
-        3) Phase 3: when agent arrives at drop, record delivery & reset.
+        3) Phase 3: when agent arrives at drop, record delivery & vacate.
+        4) Reactive re‐assignment: if a pickup becomes unreachable mid‐task, return it.
         """
-        # Hyper-parameter: how strongly to penalize hot cells
-        alpha = 0.1
+        alpha = 0.1  # heat‐penalty weight
 
         # ── Phase 1: optimal match for idle agents ──────────────────
         idle = [
@@ -302,7 +302,6 @@ class WarehouseEnvModel(Model):
                 costs = []
                 cands = []
                 for pickup, drop in self.tasks:
-                    # find free adjacent cells next to the shelf
                     neighs = self.grid.get_neighborhood(
                         pickup, moore=False, include_center=False
                     )
@@ -311,29 +310,22 @@ class WarehouseEnvModel(Model):
                         if not any(isinstance(x, Shelf)
                                 for x in self.grid.get_cell_list_contents([pos]))
                     ]
-
-                    # ——— compute best (cost, pos, path) among free_adj —————————
                     best_entries = []
                     for n in free_adj:
                         path = self.compute_path(agent.pos, n)
                         dist = len(path)
-                        # penalty = sum of heatmap values along the path
                         heat_cost = sum(self.heatmap.get(cell, 0) for cell in path)
                         total_cost = dist + alpha * heat_cost
                         best_entries.append((total_cost, n, path))
-
                     if best_entries:
                         cost, pos_sel, path_sel = min(best_entries, key=lambda x: x[0])
                     else:
                         cost, pos_sel, path_sel = float("inf"), None, []
-
                     costs.append(cost)
                     cands.append((pos_sel, path_sel))
-
                 cost_matrix.append(costs)
                 path_cands.append(cands)
 
-            # Solve the assignment
             rows, cols = linear_sum_assignment(cost_matrix)
             to_remove = []
             for r, c in zip(rows, cols):
@@ -342,50 +334,44 @@ class WarehouseEnvModel(Model):
                 agent      = idle[r]
                 pickup, drop     = self.tasks[c]
                 pickup_pos, path = path_cands[r][c]
-
                 agent.current_pickup = pickup
                 agent.pickup_pos     = pickup_pos
                 agent.next_drop      = drop
                 agent.path           = path
                 agent.state          = "to_pickup"
-
                 to_remove.append(c)
-
-            # remove tasks in descending order
             for idx in sorted(set(to_remove), reverse=True):
                 self.tasks.pop(idx)
 
-        # ── Phase 2 / 3 / 4: pickup, drop, then vacate ─────────────
-        for agent in [a for a in self.schedule.agents
-                    if isinstance(a, WarehouseAgent)]:
+        # ── Phase 2 / 3 / 4: pickup, drop, vacate & reactive re-assign ───────────
+        for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
+            # ❶ Reactive: if en-route to pickup but path empty *and* not at pickup → unreachable
+            if agent.state == "to_pickup" and not agent.path and agent.pos != agent.pickup_pos:
+                # give task back to the pool
+                self.tasks.append((agent.current_pickup, agent.next_drop))
+                agent.state = "idle"
+                continue
 
-            # Phase 2: Arrived at shelf, pick & plan dropoff
+            # ❷ Arrived at shelf → pick & plan dropoff
             if agent.state == "to_pickup" and not agent.path:
                 item = self.item_agents[agent.current_pickup].pop()
                 self.grid.remove_agent(item)
                 self.items[agent.current_pickup] -= 1
-
                 agent.path  = self.compute_path(agent.pos, agent.next_drop)
                 agent.state = "to_dropoff"
 
-            # Phase 3: Arrived at drop zone, record & plan vacate
+            # ❸ Arrived at drop zone → record & plan vacate
             elif agent.state == "to_dropoff" and not agent.path:
-                # record delivery metrics
                 self.total_task_steps  += agent.task_steps
                 agent.task_steps        = 0
                 self.total_deliveries  += 1
-
-                # plan a short path to vacate the drop area
                 staging = self.random_empty_cell()
                 agent.path  = self.compute_path(agent.pos, staging)
                 agent.state = "relocating"
 
-            # Phase 4: Finished vacating, now truly idle
+            # ❹ Finished vacating → truly idle
             elif agent.state == "relocating" and not agent.path:
                 agent.state = "idle"
-
-
-
     
     def decentralised_strategy(self):
         """
