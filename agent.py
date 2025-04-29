@@ -37,6 +37,9 @@ class WarehouseAgent(Agent):
         self.model.grid.move_agent(self, next_cell)
         self.path.pop(0)
         self.task_steps += 1
+        
+         # ── **deposit** pheromone at our new location
+        self.model.pheromones[self.pos] += self.model.pheromone_deposit
 
     def _will_collide(self, cell):
         """

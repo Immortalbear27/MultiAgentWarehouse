@@ -47,6 +47,16 @@ class WarehouseEnvModel(Model):
             for x in range(self.width)
             for y in range(self.height)
         }
+        
+        # Pheromone parameters
+        self.pheromones = {
+            (x, y): 0.0
+            for x in range(self.width)
+            for y in range(self.height)
+        }
+        self.pheromone_deposit  = 1.0   # how much each robot leaves per step
+        self.pheromone_evap_rate = 0.05 # fraction to evaporate each tick
+        self.gamma               = 0.5  # weight for pheromone attraction in cost
 
         
         # 1️⃣ Counters for metrics
@@ -242,6 +252,7 @@ class WarehouseEnvModel(Model):
         self.schedule.step()
         self.update_congestion_metrics()
         self.apply_strategy()
+        self.evaporate_pheromones()
         self.collect_tick_data()
 
     def update_congestion_metrics(self):
@@ -261,6 +272,10 @@ class WarehouseEnvModel(Model):
         for cell in congested_cells:
             self.heatmap[cell] += 1
 
+    def evaporate_pheromones(self):
+        rho = self.pheromone_evap_rate
+        for cell, lvl in self.pheromones.items():
+            self.pheromones[cell] = lvl * (1 - rho)
 
     def apply_strategy(self):
         """
@@ -319,7 +334,8 @@ class WarehouseEnvModel(Model):
                         dist = len(path)
                         heat_cost = sum(self.heatmap.get(cell, 0) for cell in path)
                         fairness_cost = beta * agent.deliveries
-                        total_cost = dist + alpha * heat_cost
+                        pher_cost = sum(self.pheromones[cell] for cell in path)
+                        total_cost = dist + alpha * heat_cost + fairness_cost - self.gamma * pher_cost
                         best_entries.append((total_cost, n, path))
                     if best_entries:
                         cost, pos_sel, path_sel = min(best_entries, key=lambda x: x[0])
