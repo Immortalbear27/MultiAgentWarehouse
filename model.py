@@ -87,6 +87,15 @@ class WarehouseEnvModel(Model):
 
         # 1️⃣ Spawn multiple robots
         self.robots = self.spawn_robots(self.num_agents)
+        
+        # Create per-robot task bags:
+        self.swarm_tasks: dict[WarehouseAgent, list[tuple, tuple]] = {
+            robot: [] for robot in self.robots
+        }
+        for idx, task in enumerate(self.tasks):
+            # Round-robin assignment:
+            robot = self.robots[idx % len(self.robots)]
+            self.swarm_tasks[robot].append(task)
 
     def spawn_robots(self, num_agents: int) -> list[WarehouseAgent]:
         """
@@ -332,7 +341,53 @@ class WarehouseEnvModel(Model):
 
     
     def swarm_strategy(self):
-        pass
+        """
+        Each robot looks only at its own bag of tasks, in order.
+        When it’s idle, it pops the next (pickup, drop) pair and executes
+        the same 3‐phase logic as centralised.
+        """
+        for agent in self.robots:
+            # Phase 1: pick up new task if idle
+            if getattr(agent, "state", None) in (None, "idle") and self.swarm_tasks[agent]:
+                pickup, drop = self.swarm_tasks[agent].pop(0)
+
+                # find a free adjacent cell next to the shelf
+                neighbors = self.grid.get_neighborhood(
+                    pickup, moore=False, include_center=False
+                )
+                free_adj = [
+                    pos for pos in neighbors
+                    if not any(isinstance(x, Shelf)
+                            for x in self.grid.get_cell_list_contents([pos]))
+                ]
+                # pick the neighbor closest (manhattan) to the agent
+                best_adj = min(
+                    free_adj,
+                    key=lambda pos: abs(agent.pos[0] - pos[0]) +
+                                    abs(agent.pos[1] - pos[1])
+                )
+
+                agent.current_pickup = pickup
+                agent.pickup_pos     = best_adj
+                agent.next_drop      = drop
+                agent.path           = self.compute_path(agent.pos, best_adj)
+                agent.state          = "to_pickup"
+
+            # Phase 2: arrived next to shelf
+            elif agent.state == "to_pickup" and not agent.path:
+                item = self.item_agents[agent.current_pickup].pop()
+                self.grid.remove_agent(item)
+                self.items[agent.current_pickup] -= 1
+
+                agent.path  = self.compute_path(agent.pos, agent.next_drop)
+                agent.state = "to_dropoff"
+
+            # Phase 3: arrived at drop
+            elif agent.state == "to_dropoff" and not agent.path:
+                self.total_task_steps   += agent.task_steps
+                agent.task_steps         = 0
+                agent.state             = "idle"
+                self.total_deliveries   += 1
     
     def _heuristic(self, a: tuple[int,int], b: tuple[int,int]) -> int:
         """Manhattan distance on a 4-way grid."""
