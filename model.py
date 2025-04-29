@@ -287,7 +287,10 @@ class WarehouseEnvModel(Model):
         3) Phase 3: when agent arrives at drop, record delivery & vacate.
         4) Reactive re‐assignment: if a pickup becomes unreachable mid‐task, return it.
         """
+        
+        # Hyper-parameters:
         alpha = 0.1  # heat‐penalty weight
+        beta = 0.5   # how strongly to “punish” already‐busy agents
 
         # ── Phase 1: optimal match for idle agents ──────────────────
         idle = [
@@ -315,6 +318,7 @@ class WarehouseEnvModel(Model):
                         path = self.compute_path(agent.pos, n)
                         dist = len(path)
                         heat_cost = sum(self.heatmap.get(cell, 0) for cell in path)
+                        fairness_cost = beta * agent.deliveries
                         total_cost = dist + alpha * heat_cost
                         best_entries.append((total_cost, n, path))
                     if best_entries:
@@ -364,6 +368,7 @@ class WarehouseEnvModel(Model):
             elif agent.state == "to_dropoff" and not agent.path:
                 self.total_task_steps  += agent.task_steps
                 agent.task_steps        = 0
+                agent.deliveries += 1
                 self.total_deliveries  += 1
                 staging = self.random_empty_cell()
                 agent.path  = self.compute_path(agent.pos, staging)

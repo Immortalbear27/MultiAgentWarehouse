@@ -77,5 +77,5 @@ def Page():
         [space, plot],         # your grid component
         model_params = model_params,
         name="Warehouse Layout",
-        play_interval=125 # 0s between steps
+        play_interval=25 # 0s between steps
     )

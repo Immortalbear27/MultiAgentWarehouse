@@ -19,6 +19,7 @@ class WarehouseAgent(Agent):
         self.state = "idle"
         self.path  = []
         self.task_steps = 0
+        self.deliveries = 0
 
     def step(self):
         # If no path to follow or just delivered, skip movement
