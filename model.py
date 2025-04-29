@@ -16,16 +16,16 @@ class WarehouseEnvModel(Model):
     """
     def __init__(
         self,
-        width: int = 30,
-        height: int = 30,
-        shelf_coords: list[tuple[int,int]] = None,
-        drop_coords:  list[tuple[int,int]] = None,
-        shelf_rows: int = 5,
-        shelf_edge_gap: int = 1,
-        aisle_interval: int = 5,
-        num_agents: int = 3,
-        strategy: str = "centralised",
-        seed:         int = None
+        width = 30,
+        height = 30,
+        shelf_coords = None,
+        drop_coords = None,
+        shelf_rows = 5,
+        shelf_edge_gap = 1,
+        aisle_interval = 5,
+        num_agents = 3,
+        strategy = "centralised",
+        seed = None
     ):
         super().__init__(seed=seed)
         self.width = width

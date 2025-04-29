@@ -18,7 +18,7 @@ def agent_portrayal(agent):
         size = 60
     elif agent_type == "DropZone":
         color = "green"
-        size = 60
+        size = 150
     elif agent_type == "WarehouseAgent":
         color = "blue"
         size = 60
@@ -75,5 +75,5 @@ def Page():
         [space, plot],         # your grid component
         model_params = model_params,
         name="Warehouse Layout",
-        play_interval=500  # ms between steps
+        play_interval=1 # 0s between steps
     )
