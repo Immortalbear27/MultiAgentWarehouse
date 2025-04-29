@@ -8,6 +8,8 @@ from agent import Shelf, DropZone, WarehouseAgent, ShelfItem
 from collections import deque
 import heapq
 from math import inf
+from scipy.optimize import linear_sum_assignment
+
 
 
 class WarehouseEnvModel(Model):
