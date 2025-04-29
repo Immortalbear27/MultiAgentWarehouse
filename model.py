@@ -22,6 +22,7 @@ class WarehouseEnvModel(Model):
         height = 30,
         shelf_coords = None,
         drop_coords = None,
+        drop_zone_size = 1,
         shelf_rows = 5,
         shelf_edge_gap = 1,
         aisle_interval = 5,
@@ -34,10 +35,19 @@ class WarehouseEnvModel(Model):
         self.height = height
         self.strategy = strategy
         self.num_agents = num_agents
+        self.drop_zone_size = drop_zone_size
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
         self.schedule = SimultaneousActivation(self)
+        
+        # keep a running count of how often each cell has ≥1 robot
+        self.heatmap = {
+            (x, y): 0
+            for x in range(self.width)
+            for y in range(self.height)
+        }
+
         
         # 1️⃣ Counters for metrics
         self.total_deliveries = 0        # Amount of total deliveries made
@@ -82,10 +92,6 @@ class WarehouseEnvModel(Model):
 
         # Shuffle so tasks come in random order
         self.random.shuffle(self.tasks)
-
-        for pos in self.drop_coords:
-            dz = DropZone(self)
-            self.grid.place_agent(dz, pos)
 
         # 1️⃣ Spawn multiple robots
         self.robots = self.spawn_robots(self.num_agents)
@@ -147,19 +153,61 @@ class WarehouseEnvModel(Model):
             self.grid.place_agent(Shelf(self), pos)
         return coords
     
+    # def create_drop_zones(self, drop_coords=None):
+    #     """
+    #     For each center in drop_coords (e.g. your four corner points),
+    #     spawn a (2*drop_zone_size-1)^2 square around it, clipped to the grid.
+    #     Returns the list of coords actually used.
+    #     """
+    #     if drop_coords is None:
+    #         # originally just bottom‐left and top‐right:
+    #         drop_coords = [
+    #         (0, 0),                                 # bottom-left
+    #         (self.width - 1, 0),                    # bottom-right
+    #         (0, self.height - 1),                   # top-left
+    #         (self.width - 1, self.height - 1)       # top-right
+    #     ]
+    #     for pos in drop_coords:
+    #         self.grid.place_agent(DropZone(self), pos)
+    #     return drop_coords
+    
     def create_drop_zones(
         self,
-        drop_coords: list[tuple[int,int]] | None
+        drop_coords: list[tuple[int,int]] | None = None
     ) -> list[tuple[int,int]]:
         """
-        Default to the two corners if none provided, place DropZone agents,
-        and return the coord list.
+        1) Determine the 4 “base” corners (or use `drop_coords` if provided).
+        2) For each corner (cx,cy), build a (2s-1)x(2s-1) square around it,
+           clipped to grid bounds, where s == self.drop_zone_size.
+        3) Place a DropZone agent at every such cell.
+        4) Return the full list of coords.
         """
-        if drop_coords is None:
-            drop_coords = [(0, 0), (self.width - 1, self.height - 1)]
-        for pos in drop_coords:
-            self.grid.place_agent(DropZone(self), pos)
-        return drop_coords
+        # 1) base corners
+        bases = drop_coords or [
+            (0, 0),
+            (self.width - 1, 0),
+            (0, self.height - 1),
+            (self.width - 1, self.height - 1),
+        ]
+        # radius from center: size=1→r=0, size=2→r=1 (3×3), size=3→r=2 (5×5)
+        r = self.drop_zone_size - 1
+
+        # 2) build set of all expanded coords
+        expanded = set()
+        for cx, cy in bases:
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    x = min(max(cx + dx, 0), self.width - 1)
+                    y = min(max(cy + dy, 0), self.height - 1)
+                    expanded.add((x, y))
+
+        # 3) place the agents
+        for (x, y) in expanded:
+            dz = DropZone(self)
+            self.grid.place_agent(dz, (x, y))
+
+        # 4) return as list
+        return list(expanded)
 
     def create_items(
         self,
@@ -197,21 +245,22 @@ class WarehouseEnvModel(Model):
         self.collect_tick_data()
 
     def update_congestion_metrics(self):
-        """
-        Count cells with ≥1 robot (for congestion) and >1 robot
-        (for collisions), then update accumulators.
-        """
         collisions = 0
-        congested = 0
-        for contents, _ in self.grid.coord_iter():
+        congested_cells = []
+        for contents, (x, y) in self.grid.coord_iter():
             robots = [a for a in contents if isinstance(a, WarehouseAgent)]
             if len(robots) > 1:
                 collisions += 1
             if robots:
-                congested += 1
+                congested_cells.append((x, y))
 
         self.collisions      += collisions
-        self.congestion_accum += congested
+        self.congestion_accum += len(congested_cells)
+
+        # **new**: increment heatmap counts for every cell that had ≥1 robot
+        for cell in congested_cells:
+            self.heatmap[cell] += 1
+
 
     def apply_strategy(self):
         """
@@ -233,38 +282,85 @@ class WarehouseEnvModel(Model):
         
     def centralised_strategy(self):
         """
-        Three‐phase centralised task loop:
-          1) idle → pick next task & plan to stand adjacent to shelf
-          2) arrived at pickup adjacent cell → remove item & plan drop leg
-          3) arrived at drop zone → mark delivery, reset agent
+        1) Optimal assignment of idle agents → pickup‐adjacent cell (with congestion penalty).
+        2) Phase 2: when agent arrives at pickup, remove item & plan drop leg.
+        3) Phase 3: when agent arrives at drop, record delivery & reset.
         """
-        for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
-            # Phase 1: assign pickup if idle
-            if getattr(agent, "state", None) in (None, "idle") and self.tasks:
-                pickup_cell, drop_cell = self.tasks.pop(0)
-                # find free adjacent cells, pick closest
-                neighbours = self.grid.get_neighborhood(
-                    pickup_cell, moore=False, include_center=False
-                )
-                free_adj = [
-                    pos for pos in neighbours
-                    if not any(isinstance(x, Shelf)
-                               for x in self.grid.get_cell_list_contents([pos]))
-                ]
-                best_path, best_pos = None, None
-                for n in free_adj:
-                    p = self.compute_path(agent.pos, n)
-                    if best_path is None or len(p) < len(best_path):
-                        best_path, best_pos = p, n
+        # Hyper-parameter: how strongly to penalize hot cells
+        alpha = 0.1
 
-                agent.current_pickup = pickup_cell
-                agent.pickup_pos     = best_pos
-                agent.next_drop      = drop_cell
-                agent.path           = best_path
+        # ── Phase 1: optimal match for idle agents ──────────────────
+        idle = [
+            a for a in self.schedule.agents
+            if isinstance(a, WarehouseAgent)
+            and getattr(a, "state", None) in (None, "idle")
+        ]
+        if idle and self.tasks:
+            cost_matrix = []
+            path_cands  = []
+            for agent in idle:
+                costs = []
+                cands = []
+                for pickup, drop in self.tasks:
+                    # find free adjacent cells next to the shelf
+                    neighs = self.grid.get_neighborhood(
+                        pickup, moore=False, include_center=False
+                    )
+                    free_adj = [
+                        pos for pos in neighs
+                        if not any(isinstance(x, Shelf)
+                                for x in self.grid.get_cell_list_contents([pos]))
+                    ]
+
+                    # ——— compute best (cost, pos, path) among free_adj —————————
+                    best_entries = []
+                    for n in free_adj:
+                        path = self.compute_path(agent.pos, n)
+                        dist = len(path)
+                        # penalty = sum of heatmap values along the path
+                        heat_cost = sum(self.heatmap.get(cell, 0) for cell in path)
+                        total_cost = dist + alpha * heat_cost
+                        best_entries.append((total_cost, n, path))
+
+                    if best_entries:
+                        cost, pos_sel, path_sel = min(best_entries, key=lambda x: x[0])
+                    else:
+                        cost, pos_sel, path_sel = float("inf"), None, []
+
+                    costs.append(cost)
+                    cands.append((pos_sel, path_sel))
+
+                cost_matrix.append(costs)
+                path_cands.append(cands)
+
+            # Solve the assignment
+            rows, cols = linear_sum_assignment(cost_matrix)
+            to_remove = []
+            for r, c in zip(rows, cols):
+                if cost_matrix[r][c] == float("inf"):
+                    continue
+                agent      = idle[r]
+                pickup, drop     = self.tasks[c]
+                pickup_pos, path = path_cands[r][c]
+
+                agent.current_pickup = pickup
+                agent.pickup_pos     = pickup_pos
+                agent.next_drop      = drop
+                agent.path           = path
                 agent.state          = "to_pickup"
 
-            # Phase 2: arrived next to shelf, pick up & plan drop-off
-            elif agent.state == "to_pickup" and not agent.path:
+                to_remove.append(c)
+
+            # remove tasks in descending order
+            for idx in sorted(set(to_remove), reverse=True):
+                self.tasks.pop(idx)
+
+        # ── Phase 2 / 3 / 4: pickup, drop, then vacate ─────────────
+        for agent in [a for a in self.schedule.agents
+                    if isinstance(a, WarehouseAgent)]:
+
+            # Phase 2: Arrived at shelf, pick & plan dropoff
+            if agent.state == "to_pickup" and not agent.path:
                 item = self.item_agents[agent.current_pickup].pop()
                 self.grid.remove_agent(item)
                 self.items[agent.current_pickup] -= 1
@@ -272,12 +368,24 @@ class WarehouseEnvModel(Model):
                 agent.path  = self.compute_path(agent.pos, agent.next_drop)
                 agent.state = "to_dropoff"
 
-            # Phase 3: arrived at drop zone, count delivery & reset
+            # Phase 3: Arrived at drop zone, record & plan vacate
             elif agent.state == "to_dropoff" and not agent.path:
-                self.total_task_steps   += agent.task_steps
-                agent.task_steps         = 0
-                agent.state             = "idle"
+                # record delivery metrics
+                self.total_task_steps  += agent.task_steps
+                agent.task_steps        = 0
                 self.total_deliveries  += 1
+
+                # plan a short path to vacate the drop area
+                staging = self.random_empty_cell()
+                agent.path  = self.compute_path(agent.pos, staging)
+                agent.state = "relocating"
+
+            # Phase 4: Finished vacating, now truly idle
+            elif agent.state == "relocating" and not agent.path:
+                agent.state = "idle"
+
+
+
     
     def decentralised_strategy(self):
         """
