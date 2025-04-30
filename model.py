@@ -74,7 +74,7 @@ class WarehouseEnvModel(Model):
         # DataCollector reporters:
         self.datacollector = DataCollector(
             model_reporters={
-                "Throughput":      lambda m: m.total_deliveries,
+                "TotalDeliveries":      lambda m: m.total_deliveries,
                 "AvgStepsPerDelivery":(
                     lambda m: m.total_task_steps / m.total_deliveries
                     if m.total_deliveries > 0 else 0
@@ -238,6 +238,10 @@ class WarehouseEnvModel(Model):
         4) Assign new tasks according to strategy.
         5) Evaporate pheromones & collect end-of-tick data.
         """
+        
+        # Assignment of tasks and selection of strategy:
+        self.apply_strategy()
+        
         # 1️⃣ Collision avoidance: build repulsive field, clean reservations, handle yields
         self._update_agent_field()
         self._cleanup_reservations()
@@ -248,7 +252,6 @@ class WarehouseEnvModel(Model):
 
         # 3️⃣ Metrics & post-step updates
         self.update_congestion_metrics()
-        self.apply_strategy()
         self.evaporate_pheromones()
         self.collect_tick_data()
 
@@ -335,8 +338,13 @@ class WarehouseEnvModel(Model):
         for agent in self.schedule.agents:
             if isinstance(agent, WarehouseAgent) and agent.path:
                 dest = agent.path[0]
+                # Reserve immediate next cell at t+1
                 self.reservations[(dest[0], dest[1], now+1)] = agent.unique_id
 
+        # --- New: Reserve second-step cell at t+2 to avoid pass-through ---
+        if len(agent.path) > 1:
+            second = agent.path[1]
+            self.reservations[(second[0], second[1], now+2)] = agent.unique_id
     def update_congestion_metrics(self):
         congested_cells = []
         for contents, (x, y) in self.grid.coord_iter():
@@ -632,40 +640,53 @@ class WarehouseEnvModel(Model):
         goal:  tuple[int,int]
     ) -> list[tuple[int,int]]:
         """
-        A* search from start to goal, avoiding shelves & robots
-        (except at the goal). Returns list of coords, excluding start.
+        Time-space reservation-aware A* search from start to goal.
+        Avoids shelves, robots, and reserved future cells.
+        Returns list of coords excluding start.
         """
         if start == goal:
             return []
 
-        open_set = [(self._heuristic(start, goal), start)]
-        came_from: dict[tuple[int,int], tuple[int,int]] = {}
-        g_score = {start: 0}
+        # Starting time-layer
+        start_time = self.schedule.time
+        # open_set holds tuples (f_score, (x, y, t))
+        open_set = []
+        heapq.heappush(open_set, (self._heuristic(start, goal), (start[0], start[1], start_time)))
+        came_from: dict[tuple[int,int,int], tuple[int,int,int]] = {}
+        g_score = {(start[0], start[1], start_time): 0}
 
         while open_set:
-            f_current, current = heapq.heappop(open_set)
-            if current == goal:
+            _, (x, y, t) = heapq.heappop(open_set)
+            if (x, y) == goal:
+                goal_time = t
                 break
 
-            for nbr in self.grid.get_neighborhood(current, moore=False, include_center=False):
-                if not self._is_passable(nbr, goal):
+            for nbr in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
+                nx, ny = nbr
+                nt = t + 1
+                # Skip reserved cells at time nt
+                if hasattr(self, 'reservations') and (nx, ny, nt) in self.reservations:
+                    # reservation-aware: cannot enter this cell at this time
                     continue
+                # Skip impassable by original logic
+                if not self._is_passable((nx, ny), goal):
+                    continue
+                tentative_g = g_score[(x, y, t)] + 1
+                key = (nx, ny, nt)
+                if tentative_g < g_score.get(key, inf):
+                    came_from[key] = (x, y, t)
+                    g_score[key] = tentative_g
+                    f_score = tentative_g + self._heuristic((nx, ny), goal)
+                    heapq.heappush(open_set, (f_score, key))
+        else:
+            # No path found
+            return []
 
-                tentative_g = g_score[current] + 1
-                if tentative_g < g_score.get(nbr, inf):
-                    came_from[nbr] = current
-                    g_score[nbr] = tentative_g
-                    f_score = tentative_g + self._heuristic(nbr, goal)
-                    heapq.heappush(open_set, (f_score, nbr))
-
-        # Reconstruct path
+        # Reconstruct path from goal_time back to start
         path: list[tuple[int,int]] = []
-        node = goal
-        if node not in came_from and node != start:
-            return []   # no path found
-
-        while node != start:
-            path.append(node)
+        node = (goal[0], goal[1], goal_time)
+        while (node[0], node[1], node[2]) != (start[0], start[1], start_time):
+            path.append((node[0], node[1]))
             node = came_from[node]
         path.reverse()
         return path
