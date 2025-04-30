@@ -289,32 +289,47 @@ class WarehouseEnvModel(Model):
         """
         Detect conflicts on next move and apply local sidesteps & reserve future cells.
         """
+        """
+        Simple forced-left collision avoidance:
+        1️⃣ If two or more agents intend the same cell, whoever can move left does so.
+        2️⃣ Others proceed or sidestep if left is blocked.
+        3️⃣ Reserve next cells.
+        """
         now = self.schedule.time
-        # 1️⃣ Priority-based sidesteps
+        # Build next move intents
         next_moves = {}
         for agent in self.schedule.agents:
             if isinstance(agent, WarehouseAgent) and agent.path:
                 dest = agent.path[0]
                 next_moves.setdefault(dest, []).append(agent)
+
         for dest, agents in next_moves.items():
             if len(agents) > 1:
-                # Track that a collision would have occurred:
-                self.collisions += 1
-                agents.sort(key=lambda a: a.unique_id)
-                for a in agents[1:]:
-                    # sidestep to any free neighbor
-                    # Randomises sidestep direction to then avoid deterministic 'mirror-dance':
-                    dirs = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+                # Force left preference
+                for agent in agents:
+                    # attempt move left relative to current heading
+                    # assume left is x-1
+                    left_cell = (agent.pos[0] - 1, agent.pos[1])
+                    if 0 <= left_cell[0] < self.width and 0 <= left_cell[1] < self.height:
+                        if self.grid.is_cell_empty(left_cell):
+                            # insert left move before intended move
+                            agent.path.insert(0, left_cell)
+                            # replan remaining path to original goal
+                            agent.path = self.compute_path(agent.pos, agent.path[-1])
+                            continue
+                # Placeholder collision metric update here:
+                
+                # If left moves not possible, fallback to random sidestep
+                for agent in agents:
+                    dirs = [(0,1),(1,0),(0,-1),(-1,0)]
                     self.random.shuffle(dirs)
                     for dx, dy in dirs:
-                        alt = (a.pos[0]+dx, a.pos[1]+dy)
-                        if 0 <= alt[0] < self.width and 0 <= alt[1] < self.height:
-                            if self.grid.is_cell_empty(alt):
-                                a.path.insert(0, alt)
-                                break
-                    # replan remaining
-                    a.path = self.compute_path(a.pos, a.path[-1])
-        # 2️⃣ Reserve next cells to prevent head-on collisions
+                        alt = (agent.pos[0]+dx, agent.pos[1]+dy)
+                        if 0 <= alt[0] < self.width and 0 <= alt[1] < self.height and self.grid.is_cell_empty(alt):
+                            agent.path.insert(0, alt)
+                            agent.path = self.compute_path(agent.pos, agent.path[-1])
+                            break
+        # Reserve next cells to prevent head-on collisions
         if not hasattr(self, 'reservations'):
             self.reservations = {}
         for agent in self.schedule.agents:
@@ -500,7 +515,7 @@ class WarehouseEnvModel(Model):
                     best_idx, (best_pu, best_dr) = min(
                         enumerate(self.tasks),
                         key=lambda it: (
-                            abs(agent.pos[0] - it[1][0]) +
+                            abs(agent.pos[0] - it[1][0][0]) + 
                             abs(agent.pos[1] - it[1][0][1])
                         )
                     )
@@ -519,6 +534,7 @@ class WarehouseEnvModel(Model):
                 ]
                 best_adj = min(free_adj, key=lambda pos: abs(pos[0] - agent.pos[0]) + abs(pos[1] - agent.pos[1]))
                 agent.current_pickup = pickup
+                agent.pickup_pos = best_adj
                 agent.next_drop = drop
                 agent.path = self.compute_path(agent.pos, best_adj)
                 agent.state = "to_pickup"
