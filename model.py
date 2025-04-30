@@ -38,6 +38,8 @@ class WarehouseEnvModel(Model):
         self.num_agents = num_agents
         self.drop_zone_size = drop_zone_size
         self.auction_radius = auction_radius
+        self.shelf_edge_gap = shelf_edge_gap
+        self.aisle_interval = aisle_interval
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
@@ -90,7 +92,7 @@ class WarehouseEnvModel(Model):
         ]
         
         # Initialise the shelf agents:
-        self.shelf_coords = self.create_shelves(row_positions, shelf_edge_gap, aisle_interval)
+        self.shelf_coords = self.create_shelves(row_positions, self.shelf_edge_gap, self.aisle_interval)
         
         # Initialise the drop zone agents:
         self.drop_coords = self.create_drop_zones(drop_coords)
@@ -159,29 +161,13 @@ class WarehouseEnvModel(Model):
             (x, y)
             for y in row_positions
             for x in range(x0, x1)
-            if not (aisle_interval and (x - x0) % aisle_interval == 0)
+            
+            # Skip two-wide aisles:
+            if not (aisle_interval and ((x - x0) % aisle_interval in (0, 1)))
         ]
         for pos in coords:
             self.grid.place_agent(Shelf(self), pos)
         return coords
-    
-    # def create_drop_zones(self, drop_coords=None):
-    #     """
-    #     For each center in drop_coords (e.g. your four corner points),
-    #     spawn a (2*drop_zone_size-1)^2 square around it, clipped to the grid.
-    #     Returns the list of coords actually used.
-    #     """
-    #     if drop_coords is None:
-    #         # originally just bottom‐left and top‐right:
-    #         drop_coords = [
-    #         (0, 0),                                 # bottom-left
-    #         (self.width - 1, 0),                    # bottom-right
-    #         (0, self.height - 1),                   # top-left
-    #         (self.width - 1, self.height - 1)       # top-right
-    #     ]
-    #     for pos in drop_coords:
-    #         self.grid.place_agent(DropZone(self), pos)
-    #     return drop_coords
     
     def create_drop_zones(
         self,
@@ -246,28 +232,103 @@ class WarehouseEnvModel(Model):
 
     def step(self):
         """
-        1) Advance all agents one step.
-        2) Update congestion & collision metrics.
-        3) Assign new tasks according to strategy.
-        4) Collect end-of-tick data.
+        1) Collision-avoidance pre-processing
+        2) Advance all agents one step.
+        3) Update congestion & collision metrics.
+        4) Assign new tasks according to strategy.
+        5) Evaporate pheromones & collect end-of-tick data.
         """
+        # 1️⃣ Collision avoidance: build repulsive field, clean reservations, handle yields
+        self._update_agent_field()
+        self._cleanup_reservations()
+        self._handle_priority_yielding()
+
+        # 2️⃣ Movement & task logic
         self.schedule.step()
+
+        # 3️⃣ Metrics & post-step updates
         self.update_congestion_metrics()
         self.apply_strategy()
         self.evaporate_pheromones()
         self.collect_tick_data()
 
+    def _update_agent_field(self):
+        """
+        Build a repulsive potential field from current agents.
+        """
+        # Initialize field
+        if not hasattr(self, 'agent_field'):
+            # Create only once with grid dimensions
+            self.agent_field = {(x, y): 0 for x in range(self.width) for y in range(self.height)}
+        # Reset
+        for cell in self.agent_field:
+            self.agent_field[cell] = 0
+        # Deposit repulsion
+        for agent in self.schedule.agents:
+            if isinstance(agent, WarehouseAgent):
+                x, y = agent.pos
+                # Strong at agent position
+                self.agent_field[(x, y)] += 5
+                # Weaker around
+                for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    nbr = (x+dx, y+dy)
+                    if nbr in self.agent_field:
+                        self.agent_field[nbr] += 2
+
+    def _cleanup_reservations(self):
+        """
+        Remove outdated time-space reservations.
+        """
+        now = self.schedule.time
+        if not hasattr(self, 'reservations'):
+            self.reservations = {}
+        # Keep only future slots
+        self.reservations = {k: v for k, v in self.reservations.items() if k[2] > now}
+
+    def _handle_priority_yielding(self):
+        """
+        Detect conflicts on next move and apply local sidesteps & reserve future cells.
+        """
+        now = self.schedule.time
+        # 1️⃣ Priority-based sidesteps
+        next_moves = {}
+        for agent in self.schedule.agents:
+            if isinstance(agent, WarehouseAgent) and agent.path:
+                dest = agent.path[0]
+                next_moves.setdefault(dest, []).append(agent)
+        for dest, agents in next_moves.items():
+            if len(agents) > 1:
+                # Track that a collision would have occurred:
+                self.collisions += 1
+                agents.sort(key=lambda a: a.unique_id)
+                for a in agents[1:]:
+                    # sidestep to any free neighbor
+                    # Randomises sidestep direction to then avoid deterministic 'mirror-dance':
+                    dirs = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+                    self.random.shuffle(dirs)
+                    for dx, dy in dirs:
+                        alt = (a.pos[0]+dx, a.pos[1]+dy)
+                        if 0 <= alt[0] < self.width and 0 <= alt[1] < self.height:
+                            if self.grid.is_cell_empty(alt):
+                                a.path.insert(0, alt)
+                                break
+                    # replan remaining
+                    a.path = self.compute_path(a.pos, a.path[-1])
+        # 2️⃣ Reserve next cells to prevent head-on collisions
+        if not hasattr(self, 'reservations'):
+            self.reservations = {}
+        for agent in self.schedule.agents:
+            if isinstance(agent, WarehouseAgent) and agent.path:
+                dest = agent.path[0]
+                self.reservations[(dest[0], dest[1], now+1)] = agent.unique_id
+
     def update_congestion_metrics(self):
-        collisions = 0
         congested_cells = []
         for contents, (x, y) in self.grid.coord_iter():
             robots = [a for a in contents if isinstance(a, WarehouseAgent)]
-            if len(robots) > 1:
-                collisions += 1
             if robots:
                 congested_cells.append((x, y))
-
-        self.collisions      += collisions
+        
         self.congestion_accum += len(congested_cells)
 
         # **new**: increment heatmap counts for every cell that had ≥1 robot
@@ -422,9 +483,15 @@ class WarehouseEnvModel(Model):
 
             # --- assign winners ---
             assigned = {}
+            assigned_agents = set()
             for _, agent, t_idx in bids:
-                if agent.state in (None, "idle") and t_idx not in assigned:
+                if (agent not in assigned_agents
+                        and agent.state in (None, "idle")
+                        and t_idx not in assigned):
                     assigned[t_idx] = agent
+                    assigned_agents.add(agent)
+                    if len(assigned_agents) == len(idle):
+                        break
 
             # --- if nobody bid, fall back to nearest-task for all idle robots ---
             if not assigned:
@@ -433,7 +500,7 @@ class WarehouseEnvModel(Model):
                     best_idx, (best_pu, best_dr) = min(
                         enumerate(self.tasks),
                         key=lambda it: (
-                            abs(agent.pos[0] - it[1][0][0]) +
+                            abs(agent.pos[0] - it[1][0]) +
                             abs(agent.pos[1] - it[1][0][1])
                         )
                     )
@@ -444,42 +511,38 @@ class WarehouseEnvModel(Model):
             to_remove = []
             for t_idx, agent in assigned.items():
                 pickup, drop = self.tasks[t_idx]
+                # existing commit logic follows unchanged
                 neighs = self.grid.get_neighborhood(pickup, moore=False, include_center=False)
                 free_adj = [
                     pos for pos in neighs
                     if not any(isinstance(x, Shelf) for x in self.grid.get_cell_list_contents([pos]))
                 ]
-                best_adj = min(
-                    free_adj,
-                    key=lambda pos: abs(agent.pos[0] - pos[0]) + abs(agent.pos[1] - pos[1])
-                )
+                best_adj = min(free_adj, key=lambda pos: abs(pos[0] - agent.pos[0]) + abs(pos[1] - agent.pos[1]))
                 agent.current_pickup = pickup
-                agent.pickup_pos     = best_adj
-                agent.next_drop      = drop
-                agent.path           = self.compute_path(agent.pos, best_adj)
-                agent.state          = "to_pickup"
-                to_remove.append(t_idx)
+                agent.next_drop = drop
+                agent.path = self.compute_path(agent.pos, best_adj)
+                agent.state = "to_pickup"
+                to_remove.append((pickup, drop))
 
-            # remove assigned tasks
-            for idx in sorted(to_remove, reverse=True):
-                self.tasks.pop(idx)
+            # remove assigned tasks from the pool
+            for task in to_remove:
+                self.tasks.remove(task)
 
-        # 2️⃣ & 3️⃣ Existing pickup & drop phases:
+        # Phase 2 & 3: handle pickups and dropoffs as before
         for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
-            # Phase 2: arrived at shelf?
             if agent.state == "to_pickup" and not agent.path:
                 item = self.item_agents[agent.current_pickup].pop()
                 self.grid.remove_agent(item)
                 self.items[agent.current_pickup] -= 1
-                agent.path  = self.compute_path(agent.pos, agent.next_drop)
+                agent.path = self.compute_path(agent.pos, agent.next_drop)
                 agent.state = "to_dropoff"
 
-            # Phase 3: arrived at drop?
             elif agent.state == "to_dropoff" and not agent.path:
-                self.total_task_steps  += agent.task_steps
-                agent.task_steps        = 0
-                agent.state             = "idle"
-                self.total_deliveries  += 1
+                self.total_task_steps += agent.task_steps
+                agent.task_steps = 0
+                agent.state = "idle"
+                self.total_deliveries += 1
+
 
     
     def swarm_strategy(self):
