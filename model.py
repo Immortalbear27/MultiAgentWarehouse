@@ -28,6 +28,7 @@ class WarehouseEnvModel(Model):
         aisle_interval = 5,
         num_agents = 3,
         strategy = "centralised",
+        auction_radius = 10,
         seed = None
     ):
         super().__init__(seed=seed)
@@ -36,6 +37,7 @@ class WarehouseEnvModel(Model):
         self.strategy = strategy
         self.num_agents = num_agents
         self.drop_zone_size = drop_zone_size
+        self.auction_radius = auction_radius
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
@@ -396,60 +398,83 @@ class WarehouseEnvModel(Model):
     
     def decentralised_strategy(self):
         """
-        Each idle robot picks its closest outstanding task,
-        then proceeds: move to pickup, then to dropoff.
+        Auction-based decentralised task allocation:
+        1) Idle robots within auction_radius bid for nearby tasks.
+        2) Task goes to highest bidder (highest bid = 1/(distance+1)).
+        3) Phase 2/3: pick up & drop as before.
         """
-        agents = [a for a in self.schedule.agents
-                  if isinstance(a, WarehouseAgent)]
-        for agent in agents:
-            # ── Phase 1: idle robots claim nearest task ────────────
-            if getattr(agent, "state", None) in (None, "idle") and self.tasks:
-                # find (index, (pickup,drop)) with minimum Manhattan distance
-                best_idx, (best_pickup, best_drop) = min(
-                    enumerate(self.tasks),
-                    key=lambda item: (
-                        abs(agent.pos[0] - item[1][0][0]) +
-                        abs(agent.pos[1] - item[1][0][1])
-                    )
-                )
-                # remove that task
-                self.tasks.pop(best_idx)
 
-                # choose a free adjacent cell to the pickup
-                neighbours = self.grid.get_neighborhood(
-                    best_pickup, moore=False, include_center=False
-                )
+        # 1️⃣ Collect idle agents and unassigned tasks
+        idle = [
+            a for a in self.schedule.agents
+            if isinstance(a, WarehouseAgent)
+            and getattr(a, "state", None) in (None, "idle")
+        ]
+        if idle and self.tasks:
+            # --- build & sort auction bids ---
+            bids = []
+            for t_idx, (pickup, drop) in enumerate(self.tasks):
+                for agent in idle:
+                    dist = abs(agent.pos[0] - pickup[0]) + abs(agent.pos[1] - pickup[1])
+                    if dist <= self.auction_radius:
+                        bids.append((1.0/(dist+1), agent, t_idx))
+            bids.sort(key=lambda x: -x[0])
+
+            # --- assign winners ---
+            assigned = {}
+            for _, agent, t_idx in bids:
+                if agent.state in (None, "idle") and t_idx not in assigned:
+                    assigned[t_idx] = agent
+
+            # --- if nobody bid, fall back to nearest-task for all idle robots ---
+            if not assigned:
+                for agent in idle:
+                    # find the closest remaining task
+                    best_idx, (best_pu, best_dr) = min(
+                        enumerate(self.tasks),
+                        key=lambda it: (
+                            abs(agent.pos[0] - it[1][0][0]) +
+                            abs(agent.pos[1] - it[1][0][1])
+                        )
+                    )
+                    # assign immediately
+                    assigned[best_idx] = agent
+
+            # --- commit whichever assignments we have ---
+            to_remove = []
+            for t_idx, agent in assigned.items():
+                pickup, drop = self.tasks[t_idx]
+                neighs = self.grid.get_neighborhood(pickup, moore=False, include_center=False)
                 free_adj = [
-                    pos for pos in neighbours
-                    if not any(isinstance(x, Shelf)
-                               for x in self.grid.get_cell_list_contents([pos]))
+                    pos for pos in neighs
+                    if not any(isinstance(x, Shelf) for x in self.grid.get_cell_list_contents([pos]))
                 ]
-                # pick the one closest to the agent by straight-line distance
                 best_adj = min(
                     free_adj,
-                    key=lambda pos: abs(agent.pos[0] - pos[0]) +
-                                    abs(agent.pos[1] - pos[1])
+                    key=lambda pos: abs(agent.pos[0] - pos[0]) + abs(agent.pos[1] - pos[1])
                 )
-
-                # assign the task
-                agent.current_pickup = best_pickup
+                agent.current_pickup = pickup
                 agent.pickup_pos     = best_adj
-                agent.next_drop      = best_drop
+                agent.next_drop      = drop
                 agent.path           = self.compute_path(agent.pos, best_adj)
                 agent.state          = "to_pickup"
+                to_remove.append(t_idx)
 
-            # ── Phase 2: arrived at shelf, pick & plan dropoff ─────
-            elif agent.state == "to_pickup" and not agent.path:
-                # remove one item
+            # remove assigned tasks
+            for idx in sorted(to_remove, reverse=True):
+                self.tasks.pop(idx)
+
+        # 2️⃣ & 3️⃣ Existing pickup & drop phases:
+        for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
+            # Phase 2: arrived at shelf?
+            if agent.state == "to_pickup" and not agent.path:
                 item = self.item_agents[agent.current_pickup].pop()
                 self.grid.remove_agent(item)
                 self.items[agent.current_pickup] -= 1
-
-                # plan path to drop zone
                 agent.path  = self.compute_path(agent.pos, agent.next_drop)
                 agent.state = "to_dropoff"
 
-            # ── Phase 3: arrived at drop, record & reset ──────────
+            # Phase 3: arrived at drop?
             elif agent.state == "to_dropoff" and not agent.path:
                 self.total_task_steps  += agent.task_steps
                 agent.task_steps        = 0

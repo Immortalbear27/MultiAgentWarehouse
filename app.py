@@ -52,7 +52,8 @@ def Page():
                                    shelf_edge_gap = 2,
                                    aisle_interval = 5, 
                                    num_agents = 8,
-                                   drop_zone_size = 2)
+                                   drop_zone_size = 2,
+                                   auction_radius = 10)
 
     # 2️⃣ Wrap it in Solara’s reactive system
     reactive_model = sl.reactive(model_inst)
@@ -63,6 +64,7 @@ def Page():
         "width": Slider("Width of Warehouse", 30, 10, 60),
         "height": Slider("Height of Warehouse", 25, 10, 60),
         "drop_zone_size": Slider("Size of Drop Zones", 2, 1, 3, step = 1),
+        "auction_radius": Slider("Auction Radius", 10, 3, 25, step = 1),
         "strategy": {
             "type": "Select",
             "value": "centralised",
