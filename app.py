@@ -1,5 +1,3 @@
-# app.py
-
 import solara as sl
 from mesa.visualization import SolaraViz, make_space_component, make_plot_component, Slider
 from model import WarehouseEnvModel
@@ -38,6 +36,20 @@ plot = make_plot_component(
     ["TotalDeliveries", "Collisions", "PendingTasks", "AvgStepsPerDelivery"],
     backend="matplotlib"
 )
+
+@sl.component
+def ExportButton(model):
+    """
+    A simple button that, when clicked, will pull the current
+    DataCollector dataframe off the model and write it out as CSV.
+    """
+    sl.Button(
+        "Export CSV",
+        on_click=lambda: model.datacollector
+                             .get_model_vars_dataframe()
+                             .to_csv("results.csv", index=False),
+    )
+
 
 @sl.component
 def Page():
@@ -85,8 +97,9 @@ def Page():
     # 3️⃣ Pass it positionally to SolaraViz along with your space drawer
     return SolaraViz(
         reactive_model,  # must be an instance so .grid exists
-        [space, plot],         # your grid component
+        [space, plot, ExportButton],         # your grid component
         model_params = model_params,
         name="Warehouse Layout",
         play_interval=25 # 0s between steps
     )
+
