@@ -29,6 +29,8 @@ class WarehouseEnvModel(Model):
         num_agents = 3,
         strategy = "centralised",
         auction_radius = 10,
+        item_respawn_delay = 50,
+        respawn_enabled = True,
         seed = None
     ):
         super().__init__(seed=seed)
@@ -40,6 +42,9 @@ class WarehouseEnvModel(Model):
         self.auction_radius = auction_radius
         self.shelf_edge_gap = shelf_edge_gap
         self.aisle_interval = aisle_interval
+        self.item_respawn_delay = item_respawn_delay
+        self.respawn_enabled = respawn_enabled
+        self.respawn_queue: deque[tuple[tuple[int, int], int]] = deque()
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
@@ -568,55 +573,163 @@ class WarehouseEnvModel(Model):
                 self.total_deliveries += 1
 
 
-    
     def swarm_strategy(self):
         """
-        Each robot looks only at its own bag of tasks, in order.
-        When it’s idle, it pops the next (pickup, drop) pair and executes
-        the same 3‐phase logic as centralised.
+        Comprehensive swarm strategy with collective task assignment:
+         • Collective grab: idle clusters pick up nearby tasks as a group
+         • Separation: respect reservations, avoid occupied cells
+         • Cohesion: stay within a 3-cell cluster via centroid steering
+         • Stigmergy: deposit/attract to pickup pheromones
+         • Repulsive field: avoid congested areas
+         • Time-space reservations: block head-on collisions (t+1)
+         • Reactive clearing: abandon tasks when corridor is too dense
         """
+        now = self.schedule.time
+        # ensure reservations exists
+        if not hasattr(self, 'reservations'):
+            self.reservations = {}
+
+        # 0️⃣ Collective task grab for clusters of idle agents
+        pickup_radius = 3
+        idle_agents = [a for a in self.robots if a.state == 'idle']
+        visited = set()
+        for agent in idle_agents:
+            if agent in visited:
+                continue
+            cluster = {agent}
+            queue = [agent]
+            while queue:
+                a = queue.pop(0)
+                for b in idle_agents:
+                    if b not in cluster and abs(a.pos[0]-b.pos[0]) + abs(a.pos[1]-b.pos[1]) <= pickup_radius:
+                        cluster.add(b)
+                        queue.append(b)
+            visited |= cluster
+            # find tasks within radius, up to cluster size
+            candidates = [ (idx, pu, dr) for idx, (pu, dr) in enumerate(self.tasks)
+                           if any(abs(a.pos[0]-pu[0])+abs(a.pos[1]-pu[1])<=pickup_radius for a in cluster) ]
+            for (idx, pu, dr), a in zip(candidates, cluster):
+                self.tasks.pop(idx)
+                # pick adjacent free cell for pickup
+                neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
+                free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
+                if not free_adj:
+                    continue
+                best_adj = min(free_adj, key=lambda pos: abs(a.pos[0]-pos[0]) + abs(a.pos[1]-pos[1]))
+                a.current_pickup = pu
+                a.pickup_pos     = best_adj
+                a.next_drop      = dr
+                a.state          = 'to_pickup'
+                a.path           = self.compute_path(a.pos, best_adj)
+                if a.path:
+                    f = a.path[0]
+                    self.reservations[(f[0], f[1], now+1)] = a.unique_id
+
+                # 0️⃣.b Exploration fallback: dispatch cluster toward nearest pickup if no active 'to_pickup'
+        if self.tasks and not any(a.state=='to_pickup' for a in self.robots):
+            # centroid of idle agents
+            idle_agents = [a for a in self.robots if a.state=='idle']
+            if idle_agents:
+                cx = sum(a.pos[0] for a in idle_agents) / len(idle_agents)
+                cy = sum(a.pos[1] for a in idle_agents) / len(idle_agents)
+                # nearest task by centroid distance
+                idx, (pu, dr) = min(
+                    enumerate(self.tasks),
+                    key=lambda t: abs(cx - t[1][0][0]) + abs(cy - t[1][0][1])
+                )
+                # assign exploration targets
+                for a in idle_agents:
+                    neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
+                    free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
+                    if not free_adj:
+                        continue
+                    best_adj = min(
+                        free_adj,
+                        key=lambda pos: abs(a.pos[0]-pos[0]) + abs(a.pos[1]-pos[1])
+                    )
+                    a.current_pickup = pu
+                    a.pickup_pos     = best_adj
+                    a.next_drop      = dr
+                    a.state          = 'to_pickup'
+                    a.path           = self.compute_path(a.pos, best_adj)
+                    if a.path:
+                        f = a.path[0]
+                        self.reservations[(f[0], f[1], now+1)] = a.unique_id
+        # 1️⃣ Stigmergy: boost pheromone at pending pickups
+        for pu, _ in self.tasks:
+            self.pheromones[pu] += 0.5
+
+        # 2️⃣ Update repulsive field and clean reservations
+        self._update_agent_field()
+        self._cleanup_reservations()
+
+        # 3️⃣ Movement: task-driven movers then swarm movers
+        # → Task-driven movers
         for agent in self.robots:
-            # Phase 1: pick up new task if idle
-            if getattr(agent, "state", None) in (None, "idle") and self.swarm_tasks[agent]:
-                pickup, drop = self.swarm_tasks[agent].pop(0)
+            if agent.state in ('to_pickup', 'to_dropoff'):
+                goal = agent.pickup_pos if agent.state=='to_pickup' else agent.next_drop
+                if not getattr(agent, 'path', []):
+                    agent.path = self.compute_path(agent.pos, goal)
+                if agent.path:
+                    nxt = agent.path.pop(0)
+                    self.reservations[(nxt[0], nxt[1], now+1)] = agent.unique_id
+                    self.grid.move_agent(agent, nxt)
+                # pickup if reached pickup_pos
+                if agent.state=='to_pickup' and agent.pos==agent.pickup_pos and not agent.path:
+                    items_here = self.item_agents.get(agent.current_pickup, [])
+                    if items_here:
+                        item = self.item_agents[agent.current_pickup].pop()
+                        self.grid.remove_agent(item)
+                        self.items[agent.current_pickup] -= 1
+                        agent.state = 'to_dropoff'
+                        agent.path = []
+                    else:
+                        # No items left here, so revert to idle:
+                        agent.state = 'idle'
+                        agent.path = []
+                # dropoff if reached next_drop
+                if agent.state=='to_dropoff' and agent.pos==agent.next_drop and not agent.path:
+                    self.total_task_steps += agent.task_steps
+                    agent.task_steps = 0
+                    agent.deliveries += 1
+                    self.total_deliveries += 1
+                    agent.state = 'idle'
+                continue
 
-                # find a free adjacent cell next to the shelf
-                neighbors = self.grid.get_neighborhood(
-                    pickup, moore=False, include_center=False
-                )
-                free_adj = [
-                    pos for pos in neighbors
-                    if not any(isinstance(x, Shelf)
-                            for x in self.grid.get_cell_list_contents([pos]))
-                ]
-                # pick the neighbor closest (manhattan) to the agent
-                best_adj = min(
-                    free_adj,
-                    key=lambda pos: abs(agent.pos[0] - pos[0]) +
-                                    abs(agent.pos[1] - pos[1])
-                )
+        # → Swarm-based movers for idle
+        for agent in self.robots:
+            if agent.state=='idle':
+                # reactive corridor clearing
+                close = [a for a in self.robots if a is not agent and
+                         abs(a.pos[0]-agent.pos[0])+abs(a.pos[1]-agent.pos[1])<=2]
+                if len(close)>=3:
+                    continue
+                neighs = self.grid.get_neighborhood(agent.pos, moore=False, include_center=False)
+                legal = [m for m in neighs if self._is_passable(m, None)
+                         and (m[0], m[1], now+1) not in self.reservations]
+                if not legal:
+                    continue
+                group = [a.pos for a in self.robots if a is not agent and
+                         abs(a.pos[0]-agent.pos[0])+abs(a.pos[1]-agent.pos[1])<=3]
+                if group:
+                    cx = sum(x for x,_ in group)/len(group)
+                    cy = sum(y for _,y in group)/len(group)
+                else:
+                    cx, cy = agent.pos
+                best_move, best_score = None, float('-inf')
+                for m in legal:
+                    coh = ((m[0]-agent.pos[0])*(cx-agent.pos[0]) + (m[1]-agent.pos[1])*(cy-agent.pos[1]))
+                    pher = self.pheromones.get(m, 0)
+                    rep  = self.agent_field.get(m, 0)
+                    score = coh + pher - rep
+                    if score>best_score:
+                        best_score, best_move = score, m
+                if best_move:
+                    self.reservations[(best_move[0], best_move[1], now+1)] = agent.unique_id
+                    # queue one-step move
+                    agent.path = [best_move]
 
-                agent.current_pickup = pickup
-                agent.pickup_pos     = best_adj
-                agent.next_drop      = drop
-                agent.path           = self.compute_path(agent.pos, best_adj)
-                agent.state          = "to_pickup"
 
-            # Phase 2: arrived next to shelf
-            elif agent.state == "to_pickup" and not agent.path:
-                item = self.item_agents[agent.current_pickup].pop()
-                self.grid.remove_agent(item)
-                self.items[agent.current_pickup] -= 1
-
-                agent.path  = self.compute_path(agent.pos, agent.next_drop)
-                agent.state = "to_dropoff"
-
-            # Phase 3: arrived at drop
-            elif agent.state == "to_dropoff" and not agent.path:
-                self.total_task_steps   += agent.task_steps
-                agent.task_steps         = 0
-                agent.state             = "idle"
-                self.total_deliveries   += 1
     
     def _heuristic(self, a: tuple[int,int], b: tuple[int,int]) -> int:
         """Manhattan distance on a 4-way grid."""
