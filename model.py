@@ -86,6 +86,9 @@ class WarehouseEnvModel(Model):
                 ),
                 "Collisions":      lambda m: m.collisions,
                 "PendingTasks":    lambda m: len(m.tasks),
+                "AvgCongestion": (lambda m: m.congestion_accum / m.ticks 
+                                  if m.ticks > 0 else 0),
+                "Energy": lambda m: m.total_task_steps
             }
         )
 
