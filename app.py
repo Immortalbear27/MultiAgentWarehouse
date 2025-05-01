@@ -65,7 +65,8 @@ def Page():
                                    aisle_interval = 6, 
                                    num_agents = 5,
                                    drop_zone_size = 2,
-                                   auction_radius = 10)
+                                   auction_radius = 10,
+                                   max_steps = 100)
 
     # 2️⃣ Wrap it in Solara’s reactive system
     reactive_model = sl.reactive(model_inst)

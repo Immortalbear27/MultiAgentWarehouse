@@ -31,6 +31,7 @@ class WarehouseEnvModel(Model):
         auction_radius = 10,
         item_respawn_delay = 50,
         respawn_enabled = True,
+        max_steps = 500,
         seed = None
     ):
         super().__init__(seed=seed)
@@ -45,6 +46,7 @@ class WarehouseEnvModel(Model):
         self.item_respawn_delay = item_respawn_delay
         self.respawn_enabled = respawn_enabled
         self.respawn_queue: deque[tuple[tuple[int, int], int]] = deque()
+        self.max_steps = max_steps
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
@@ -247,6 +249,11 @@ class WarehouseEnvModel(Model):
         5) Evaporate pheromones & collect end-of-tick data.
         """
         
+        # Handle automatic exiting of the program once max_steps has been reached:
+        if self.max_steps is not None and self.schedule.time >= self.max_steps:
+            self.running = False
+            return
+        
         # Handle item respawning, if applicable:
         if self.respawn_enabled:
             while self.respawn_queue and self.respawn_queue[0][1] <= self.schedule.time:
@@ -399,8 +406,18 @@ class WarehouseEnvModel(Model):
         """
         Increment tick count and collect the model’s data.
         """
+        
+        # Increment your tick counter:
         self.ticks += 1
+        # Collect into the DataCollector:
         self.datacollector.collect(self)
+        
+        # Auto-Export the dataset when the cap of max_steps has been hit:
+        if self.max_steps is not None and self.ticks >= self.max_steps:
+            # Write out all the model-level reporters to results.csv:
+            self.datacollector.get_model_vars_dataframe().to_csv("results.csv", index=False)
+            # Ensure that any external controller sees we're done:
+            self.running = False
 
         
     def centralised_strategy(self):
