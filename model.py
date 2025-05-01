@@ -690,32 +690,37 @@ class WarehouseEnvModel(Model):
         self._cleanup_reservations()
 
         # 3️⃣ Movement: task-driven movers then swarm movers
-        # → Task-driven movers
+        # → Task-driven movers: queue one-step paths for agent.step to execute
         for agent in self.robots:
             if agent.state in ('to_pickup', 'to_dropoff'):
+                # determine goal cell
                 goal = agent.pickup_pos if agent.state=='to_pickup' else agent.next_drop
-                if not getattr(agent, 'path', []):
-                    agent.path = self.compute_path(agent.pos, goal)
-                if agent.path:
-                    nxt = agent.path.pop(0)
+                # compute full path once
+                if not getattr(agent, 'full_path', None) or agent.pos == getattr(agent, 'last_goal', None):
+                    agent.full_path = self.compute_path(agent.pos, goal)
+                    agent.last_goal = goal
+                # if still path remains
+                if agent.full_path:
+                    # take next step
+                    nxt = agent.full_path.pop(0)
+                    # reserve that step
                     self.reservations[(nxt[0], nxt[1], now+1)] = agent.unique_id
-                    self.grid.move_agent(agent, nxt)
-                # pickup if reached pickup_pos
-                if agent.state=='to_pickup' and agent.pos==agent.pickup_pos and not agent.path:
+                    # queue for agent.step
+                    agent.path = [nxt]
+                # handle pickup after agent.step moves us
+                if agent.state=='to_pickup' and agent.pos==agent.pickup_pos and not agent.full_path:
                     items_here = self.item_agents.get(agent.current_pickup, [])
                     if items_here:
-                        item = self.item_agents[agent.current_pickup].pop()
+                        item = items_here.pop()
                         self.grid.remove_agent(item)
                         self.items[agent.current_pickup] -= 1
                         agent.state = 'to_dropoff'
-                        agent.path = []
+                        agent.full_path = []
                     else:
-                        # No items left here, so revert to idle:
                         agent.state = 'idle'
-                        agent.path = []
-                # dropoff if reached next_drop
-                if agent.state=='to_dropoff' and agent.pos==agent.next_drop and not agent.path:
-                    # Schedule a respawn for this shelf cell
+                        agent.full_path = []
+                # handle dropoff after agent.step moves us
+                if agent.state=='to_dropoff' and agent.pos==agent.next_drop and not agent.full_path:
                     if self.respawn_enabled:
                         self.respawn_queue.append((
                             agent.current_pickup,

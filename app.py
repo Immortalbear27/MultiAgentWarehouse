@@ -17,10 +17,10 @@ def agent_portrayal(agent):
         color = "black"
         size = 60
     elif agent_type == "DropZone":
-        color = "green"
+        color = "purple"
         size = 150
     elif agent_type == "WarehouseAgent":
-        color = "blue"
+        color = "green"
         size = 60
     elif agent_type == "ShelfItem":
         color = "orange"
