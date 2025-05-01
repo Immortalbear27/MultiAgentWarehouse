@@ -67,13 +67,14 @@ def Page():
         "aisle_interval": Slider("Aisle Interval", 6, 2, 10, step = 1),
         "drop_zone_size": Slider("Size of Drop Zones", 2, 1, 3, step = 1),
         "auction_radius": Slider("Auction Radius", 10, 3, 25, step = 1),
+        "item_respawn_delay": Slider("Item Respawn Delay", 50, 0, 200, step = 1),
         "strategy": {
             "type": "Select",
             "value": "centralised",
             "values": ["centralised", "decentralised", "swarm"],
             "label": "Coordination Strategy"
         },
-        "item_respawn_delay": Slider("Item Respawn Delay", 50, 0, 200, step = 1),
+        
         "respawn_enabled": {
             "type": "Checkbox",
             "value": "True",

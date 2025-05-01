@@ -244,6 +244,20 @@ class WarehouseEnvModel(Model):
         5) Evaporate pheromones & collect end-of-tick data.
         """
         
+        # Handle item respawning, if applicable:
+        if self.respawn_enabled:
+            while self.respawn_queue and self.respawn_queue[0][1] <= self.schedule.time:
+                shelf_pos, _ = self.respawn_queue.popleft()
+                # 1) Create a new ShelfItem at that shelf cell
+                new_item = ShelfItem(self)
+                self.grid.place_agent(new_item, shelf_pos)
+                # 2) Update your internal counters
+                self.items[shelf_pos] = self.items.get(shelf_pos, 0) + 1
+                self.item_agents[shelf_pos].append(new_item)
+                # 3) Enqueue a new task (pickup at that shelf, random drop)
+                self.tasks.append((shelf_pos, self.random.choice(self.drop_coords)))
+        
+        
         # Assignment of tasks and selection of strategy:
         self.apply_strategy()
         
@@ -473,6 +487,12 @@ class WarehouseEnvModel(Model):
 
             # ❸ Arrived at drop zone → record & plan vacate
             elif agent.state == "to_dropoff" and not agent.path:
+                # Schedule a respawn for this shelf cell
+                if self.respawn_enabled:
+                    self.respawn_queue.append((
+                        agent.current_pickup,
+                        self.schedule.time + self.item_respawn_delay
+                    ))
                 self.total_task_steps  += agent.task_steps
                 agent.task_steps        = 0
                 agent.deliveries += 1
@@ -567,6 +587,12 @@ class WarehouseEnvModel(Model):
                 agent.state = "to_dropoff"
 
             elif agent.state == "to_dropoff" and not agent.path:
+                # Schedule a respawn for this shelf cell
+                if self.respawn_enabled:
+                    self.respawn_queue.append((
+                        agent.current_pickup,
+                        self.schedule.time + self.item_respawn_delay
+                    ))
                 self.total_task_steps += agent.task_steps
                 agent.task_steps = 0
                 agent.state = "idle"
@@ -689,6 +715,12 @@ class WarehouseEnvModel(Model):
                         agent.path = []
                 # dropoff if reached next_drop
                 if agent.state=='to_dropoff' and agent.pos==agent.next_drop and not agent.path:
+                    # Schedule a respawn for this shelf cell
+                    if self.respawn_enabled:
+                        self.respawn_queue.append((
+                            agent.current_pickup,
+                            self.schedule.time + self.item_respawn_delay
+                        ))
                     self.total_task_steps += agent.task_steps
                     agent.task_steps = 0
                     agent.deliveries += 1
