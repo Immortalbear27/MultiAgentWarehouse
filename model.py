@@ -507,97 +507,102 @@ class WarehouseEnvModel(Model):
     
     def decentralised_strategy(self):
         """
-        Auction-based decentralised task allocation:
-        1) Idle robots within auction_radius bid for nearby tasks.
-        2) Task goes to highest bidder (highest bid = 1/(distance+1)).
-        3) Phase 2/3: pick up & drop as before.
+        Simplified auction-based decentralised strategy:
+         • Reactive re-assignment of unreachable pickups
+         • Each idle agent bids for its nearest task (no global auction)
+         • One task per agent per tick, nearest-by-path
+         • Simple time-space reservations (t+1)
+         • Standard pickup/dropoff phases
         """
-
-        # 1️⃣ Collect idle agents and unassigned tasks
-        idle = [
-            a for a in self.schedule.agents
-            if isinstance(a, WarehouseAgent)
-            and getattr(a, "state", None) in (None, "idle")
-        ]
-        if idle and self.tasks:
-            # --- build & sort auction bids ---
-            bids = []
-            for t_idx, (pickup, drop) in enumerate(self.tasks):
-                for agent in idle:
-                    dist = abs(agent.pos[0] - pickup[0]) + abs(agent.pos[1] - pickup[1])
-                    if dist <= self.auction_radius:
-                        bids.append((1.0/(dist+1), agent, t_idx))
-            bids.sort(key=lambda x: -x[0])
-
-            # --- assign winners ---
-            assigned = {}
-            assigned_agents = set()
-            for _, agent, t_idx in bids:
-                if (agent not in assigned_agents
-                        and agent.state in (None, "idle")
-                        and t_idx not in assigned):
-                    assigned[t_idx] = agent
-                    assigned_agents.add(agent)
-                    if len(assigned_agents) == len(idle):
-                        break
-
-            # --- if nobody bid, fall back to nearest-task for all idle robots ---
-            if not assigned:
-                for agent in idle:
-                    # find the closest remaining task
-                    best_idx, (best_pu, best_dr) = min(
-                        enumerate(self.tasks),
-                        key=lambda it: (
-                            abs(agent.pos[0] - it[1][0][0]) + 
-                            abs(agent.pos[1] - it[1][0][1])
-                        )
-                    )
-                    # assign immediately
-                    assigned[best_idx] = agent
-
-            # --- commit whichever assignments we have ---
-            to_remove = []
-            for t_idx, agent in assigned.items():
-                pickup, drop = self.tasks[t_idx]
-                # existing commit logic follows unchanged
-                neighs = self.grid.get_neighborhood(pickup, moore=False, include_center=False)
-                free_adj = [
-                    pos for pos in neighs
-                    if not any(isinstance(x, Shelf) for x in self.grid.get_cell_list_contents([pos]))
-                ]
-                best_adj = min(free_adj, key=lambda pos: abs(pos[0] - agent.pos[0]) + abs(pos[1] - agent.pos[1]))
-                agent.current_pickup = pickup
-                agent.pickup_pos = best_adj
-                agent.next_drop = drop
-                agent.path = self.compute_path(agent.pos, best_adj)
-                agent.state = "to_pickup"
-                to_remove.append((pickup, drop))
-
-            # remove assigned tasks from the pool
-            for task in to_remove:
-                self.tasks.remove(task)
-
-        # Phase 2 & 3: handle pickups and dropoffs as before
+        now = self.schedule.time
+        # Initialize reservations map if missing
+        if not hasattr(self, 'reservations'):
+            self.reservations = {}
+        # 1️⃣ Reactive re-assignment: unreachable pickups go back to pool
+        for agent in self.schedule.agents:
+            if isinstance(agent, WarehouseAgent) and agent.state == 'to_pickup':
+                if not agent.path and agent.pos != agent.pickup_pos:
+                    self.tasks.append((agent.current_pickup, agent.next_drop))
+                    agent.state = 'idle'
+        # 2️⃣ Collect idle agents
+        idle = [a for a in self.schedule.agents
+                if isinstance(a, WarehouseAgent) and a.state in (None, 'idle')]
+        # Shuffle to avoid bias
+        self.random.shuffle(idle)
+        # 3️⃣ Assign nearest task to each idle agent
+        for agent in idle:
+            if not self.tasks:
+                break
+            # compute true path lengths to all tasks
+            best = None
+            best_len = float('inf')
+            for pu, dr in self.tasks:
+                # entry point adjacent
+                neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
+                free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
+                if not free_adj:
+                    continue
+                # pick nearest entry
+                entry = min(free_adj,
+                            key=lambda pos: abs(agent.pos[0]-pos[0]) + abs(agent.pos[1]-pos[1]))
+                path = self.compute_path(agent.pos, entry)
+                if path and len(path) < best_len:
+                    best_len = len(path)
+                    best = (pu, dr, entry, path)
+            if best is None:
+                continue
+            pu, dr, entry, path = best
+            # assign task
+            agent.current_pickup = pu
+            agent.pickup_pos     = entry
+            agent.next_drop      = dr
+            agent.state          = 'to_pickup'
+            # reserve first step if exists
+            if path:
+                step = path[0]
+                self.reservations[(step[0], step[1], now+1)] = agent.unique_id
+            # store full path for movement
+            agent.full_path = path
+            # remove from pool
+            self.tasks.remove((pu, dr))
+        # 4️⃣ Standard pickup/dropoff phases
         for agent in [a for a in self.schedule.agents if isinstance(a, WarehouseAgent)]:
-            if agent.state == "to_pickup" and not agent.path:
-                item = self.item_agents[agent.current_pickup].pop()
-                self.grid.remove_agent(item)
-                self.items[agent.current_pickup] -= 1
-                agent.path = self.compute_path(agent.pos, agent.next_drop)
-                agent.state = "to_dropoff"
-
-            elif agent.state == "to_dropoff" and not agent.path:
-                # Schedule a respawn for this shelf cell
-                if self.respawn_enabled:
-                    self.respawn_queue.append((
-                        agent.current_pickup,
-                        self.schedule.time + self.item_respawn_delay
-                    ))
-                self.total_task_steps += agent.task_steps
-                agent.task_steps = 0
-                agent.state = "idle"
-                self.total_deliveries += 1
-
+            # to_pickup: follow full_path
+            if agent.state == 'to_pickup':
+                if getattr(agent, 'full_path', None):
+                    # move one step
+                    nxt = agent.full_path.pop(0)
+                    self.reservations[(nxt[0], nxt[1], now+1)] = agent.unique_id
+                    agent.path = [nxt]
+                elif agent.pos == agent.pickup_pos:
+                    # pick up
+                    if self.item_agents.get(agent.current_pickup):
+                        item = self.item_agents[agent.current_pickup].pop()
+                        self.grid.remove_agent(item)
+                        self.items[agent.current_pickup] -= 1
+                    agent.state = 'to_dropoff'
+                    agent.full_path = []
+            # to_dropoff: direct path to drop
+            elif agent.state == 'to_dropoff':
+                if not getattr(agent, 'full_path', None):
+                    agent.full_path = self.compute_path(agent.pos, agent.next_drop)
+                if agent.full_path:
+                    nxt = agent.full_path.pop(0)
+                    self.reservations[(nxt[0], nxt[1], now+1)] = agent.unique_id
+                    agent.path = [nxt]
+                elif agent.pos == agent.next_drop:
+                    # Schedule item respawn
+                    if self.respawn_enabled:
+                        self.respawn_queue.append((
+                            agent.current_pickup,
+                            now + self.item_respawn_delay
+                        ))
+                    # complete delivery
+                    self.total_task_steps += agent.task_steps
+                    agent.task_steps = 0
+                    agent.deliveries += 1
+                    self.total_deliveries += 1
+                    agent.state = 'idle'
 
     def swarm_strategy(self):
         """
