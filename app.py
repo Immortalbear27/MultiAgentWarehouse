@@ -86,7 +86,6 @@ def Page():
             "values": ["centralised", "decentralised", "swarm"],
             "label": "Coordination Strategy"
         },
-        
         "respawn_enabled": {
             "type": "Checkbox",
             "value": "True",
