@@ -11,13 +11,14 @@ variable_params = {
 
 if __name__ == "__main__":
     results = batch_run(
-    WarehouseEnvModel,
-    parameters = variable_params,
-    iterations=30,
-    max_steps=500,
-    data_collection_period = 1,
-    number_processes = None,
-    display_progress = True
-)
+        WarehouseEnvModel,
+        parameters = variable_params,
+        iterations=30,
+        max_steps=500,
+        data_collection_period = 1,
+        number_processes = 1,
+        display_progress = True
+    )
 
-pd.DataFrame(results).to_csv("batch_results.csv", index = False)
+    df = pd.DataFrame(results)
+    df.to_csv("batch_results.csv", index = False)
