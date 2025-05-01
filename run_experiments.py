@@ -1,5 +1,6 @@
-from mesa.batchrunner import BatchRunner
+from mesa.batchrunner import batch_run
 from model import WarehouseEnvModel
+import pandas as pd
 
 variable_params = {
     "strategy":       ["centralised","decentralised","swarm"],
@@ -8,14 +9,15 @@ variable_params = {
     "aisle_interval": [5,10],
 }
 
-batch = BatchRunner(
+if __name__ == "__main__":
+    results = batch_run(
     WarehouseEnvModel,
-    variable_params,
-    {},
+    parameters = variable_params,
     iterations=30,
-    max_steps=1000,
-    model_reporters=WarehouseEnvModel.datacollector.model_reporters
+    max_steps=500,
+    data_collection_period = 1,
+    number_processes = None,
+    display_progress = True
 )
-batch.run_all()
-results = batch.get_model_vars_dataframe()
-results.to_csv("results.csv", index=False)
+
+pd.DataFrame(results).to_csv("batch_results.csv", index = False)
