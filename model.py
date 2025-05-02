@@ -160,10 +160,10 @@ class WarehouseEnvModel(Model):
         Falls back to full A* only if blocked.  Caps the loop to avoid infinite cycling.
         """
         now = self.schedule.time
-        print(f"[DEBUG][{now}] compute_path_to_drop START from {start} to {goal}")
+        # print(f"[DEBUG][{now}] compute_path_to_drop START from {start} to {goal}")
 
         if goal not in self.drop_coords:
-            print(f"[DEBUG][{now}]  → goal not in drop_coords, fallback to full A*")
+            # print(f"[DEBUG][{now}]  → goal not in drop_coords, fallback to full A*")
             return self.compute_path(start, goal)
 
         path = []
@@ -174,10 +174,10 @@ class WarehouseEnvModel(Model):
 
         while (x0, y0) != goal:
             loop_count += 1
-            if loop_count % 50 == 0:
-                print(f"[DEBUG][{now}]   compute_path_to_drop loop #{loop_count} at {(x0,y0)}")
+            # if loop_count % 50 == 0:
+                # print(f"[DEBUG][{now}]   compute_path_to_drop loop #{loop_count} at {(x0,y0)}")
             if loop_count > max_loops:
-                print(f"[ERROR][{now}] compute_path_to_drop aborted after {loop_count} loops")
+                # print(f"[ERROR][{now}] compute_path_to_drop aborted after {loop_count} loops")
                 return []
 
             nbrs = self.grid.get_neighborhood((x0, y0), moore=False, include_center=False)
@@ -188,7 +188,7 @@ class WarehouseEnvModel(Model):
                 and self._is_passable((nx, ny), goal)
             ]
             if not candidates:
-                print(f"[DEBUG][{now}]   blocked at {(x0,y0)}; fallback to full A* after {loop_count} loops")
+                # print(f"[DEBUG][{now}]   blocked at {(x0,y0)}; fallback to full A* after {loop_count} loops")
                 return self.compute_path(start, goal)
 
             x1, y1 = min(candidates, key=lambda c: self.static_dist[c])
@@ -197,7 +197,7 @@ class WarehouseEnvModel(Model):
             self.reservations[(x1, y1, t+1)] = None
             x0, y0, t = x1, y1, t + 1
 
-        print(f"[DEBUG][{now}] compute_path_to_drop END (length={len(path)}, loops={loop_count})")
+        # print(f"[DEBUG][{now}] compute_path_to_drop END (length={len(path)}, loops={loop_count})")
         return path
 
 
@@ -328,8 +328,10 @@ class WarehouseEnvModel(Model):
 
         # 2️⃣ Handle respawning of shelf‐items
         if self.respawn_enabled:
-            while self.respawn_queue and self.respawn_queue[0][1] <= now:
-                shelf_pos, _ = self.respawn_queue.popleft()
+            # print(f"[DEBUG][{now}] Respawn queue before popping: {list(self.respawn_queue)}")
+            while self.respawn_queue and self.respawn_queue[0][1] <= self.ticks:
+                shelf_pos, scheduled_time = self.respawn_queue.popleft()
+                # print(f"[DEBUG][{now}]   → popping respawn of {shelf_pos} scheduled for t={scheduled_time}")
                 # spawn new item agent
                 new_item = ShelfItem(self)
                 self.grid.place_agent(new_item, shelf_pos)
@@ -338,16 +340,16 @@ class WarehouseEnvModel(Model):
                 self.item_agents[shelf_pos].append(new_item)
                 # add a new pickup→drop task
                 self.tasks.append((shelf_pos, self.random.choice(self.drop_coords)))
-                print(f"[DEBUG][{now}] Respawned item at {shelf_pos}")
+                # print(f"[DEBUG][{now}] Respawned item at {shelf_pos}")
 
         # 3️⃣ Assign new tasks
         self.apply_strategy()
 
         # Log task‐pool size and per‐agent state+path‐length
-        print(f"[DEBUG][{now}] Tasks pending = {len(self.tasks)}")
-        for a in self.schedule.agents:
-            if isinstance(a, WarehouseAgent):
-                print(f"    → Agent {a.unique_id}: state={a.state!r}, path_len={len(a.path)}")
+        # print(f"[DEBUG][{now}] Tasks pending = {len(self.tasks)}")
+        # for a in self.schedule.agents:
+        #     if isinstance(a, WarehouseAgent):
+        #         print(f"    → Agent {a.unique_id}: state={a.state!r}, path_len={len(a.path)}")
 
         # 4️⃣ Collision avoidance
         self._update_agent_field()
@@ -355,8 +357,8 @@ class WarehouseEnvModel(Model):
         self._handle_priority_yielding()
 
         # Log reservation queue and respawn‐queue depths
-        print(f"[DEBUG][{now}] Reservation slots = {len(self.reservations)}")
-        print(f"[DEBUG][{now}] Respawn queue = {len(self.respawn_queue)}")
+        # print(f"[DEBUG][{now}] Reservation slots = {len(self.reservations)}")
+        # print(f"[DEBUG][{now}] Respawn queue = {len(self.respawn_queue)}")
 
         # ── DIAGNOSTIC LOGGING ─────────────────────────────
         movable = 0
@@ -370,10 +372,10 @@ class WarehouseEnvModel(Model):
                 movable += 1
             else:
                 blocked_desc.append(f"Agent {a.unique_id} → {(nx,ny)} reserved by {reserver}")
-        print(f"[DEBUG][{now}] movable={movable}, blocked={len(blocked_desc)}")
-        for line in blocked_desc:
-            print("   ", line)
-        print(f"[DEBUG][{now}] End of pre‐move checks\n")
+        # print(f"[DEBUG][{now}] movable={movable}, blocked={len(blocked_desc)}")
+        # for line in blocked_desc:
+            # print("   ", line)
+        # print(f"[DEBUG][{now}] End of pre‐move checks\n")
 
         # 5️⃣ Advance all agents *manually* so we can see exactly who hangs
         moved = 0
@@ -381,15 +383,15 @@ class WarehouseEnvModel(Model):
             if not isinstance(agent, WarehouseAgent):
                 continue
             prepos = agent.pos
-            print(f"[DEBUG][{now}] → Agent {agent.unique_id} step() start")
+            # print(f"[DEBUG][{now}] → Agent {agent.unique_id} step() start")
             try:
                 agent.step()
             except Exception as e:
                 print(f"[ERROR][{now}] Agent {agent.unique_id} EXCEPTION in step(): {e}")
-            print(f"[DEBUG][{now}] ← Agent {agent.unique_id} step() end, now at {agent.pos}")
+            # print(f"[DEBUG][{now}] ← Agent {agent.unique_id} step() end, now at {agent.pos}")
             if agent.pos != prepos:
                 moved += 1
-        print(f"[DEBUG][{now}] Agents moved = {moved}\n")
+        # print(f"[DEBUG][{now}] Agents moved = {moved}\n")
 
         # 6️⃣ Update metrics, evaporate pheromones
         self.update_congestion_metrics()
@@ -402,7 +404,6 @@ class WarehouseEnvModel(Model):
 
         # 8️⃣ Collect data & increment tick
         self.collect_tick_data()
-
 
 
     def _update_agent_field(self):
@@ -776,7 +777,7 @@ class WarehouseEnvModel(Model):
         Aborts after a fixed maximum number of expansions.
         """
         now = self.schedule.time
-        print(f"[DEBUG][{now}] compute_path START from {start} to {goal}")
+        # print(f"[DEBUG][{now}] compute_path START from {start} to {goal}")
 
         if start == goal:
             return []
@@ -797,10 +798,10 @@ class WarehouseEnvModel(Model):
 
         while open_set:
             expansions += 1
-            if expansions % 500 == 0:
-                print(f"[DEBUG][{now}] A* expansions={expansions}, open_set size={len(open_set)}")
+            # if expansions % 500 == 0:
+            #     print(f"[DEBUG][{now}] A* expansions={expansions}, open_set size={len(open_set)}")
             if expansions > max_expansions:
-                print(f"[ERROR][{now}] A* aborted after {expansions} expansions")
+                # print(f"[ERROR][{now}] A* aborted after {expansions} expansions")
                 return []
 
             _, (x, y, t) = heapq.heappop(open_set)
@@ -818,7 +819,7 @@ class WarehouseEnvModel(Model):
                     f_score = tentative_g + self._heuristic((nx, ny), goal)
                     heapq.heappush(open_set, (f_score, key))
         else:
-            print(f"[DEBUG][{now}] A* failed to find path after {expansions} expansions")
+            # print(f"[DEBUG][{now}] A* failed to find path after {expansions} expansions")
             return []
 
         # Reconstruct path
@@ -829,7 +830,7 @@ class WarehouseEnvModel(Model):
             node = came_from[node]
         path.reverse()
 
-        print(f"[DEBUG][{now}] compute_path END (len={len(path)}, expansions={expansions})")
+        # print(f"[DEBUG][{now}] compute_path END (len={len(path)}, expansions={expansions})")
         self.path_cache[cache_key] = list(path)
         return path
 
@@ -880,8 +881,8 @@ class WarehouseEnvModel(Model):
         if not out:
             nbrs = self.grid.get_neighborhood((x, y), moore=False, include_center=False)
             blocked = [(pos, self.reservations.get((pos[0], pos[1], t+1))) for pos in nbrs]
-            print(f"[DEBUG][{self.schedule.time}] _allowed_neighbors({(x,y)}→{goal}) → [] "
-                f" nbrs={nbrs} reservations={blocked}")
+            # print(f"[DEBUG][{self.schedule.time}] _allowed_neighbors({(x,y)}→{goal}) → [] "
+            #    f" nbrs={nbrs} reservations={blocked}")
         return out
 
 
@@ -895,30 +896,39 @@ class WarehouseEnvModel(Model):
 
         # 1️⃣ unreachable en‐route → return task
         if agent.state == "to_pickup" and not agent.path and agent.pos != agent.pickup_pos:
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: unreachable {agent.pickup_pos}, returning to pool")
+            # print(f"[DEBUG][{now}] Agent {agent.unique_id}: unreachable {agent.pickup_pos}, returning to pool")
             self.tasks.append((agent.current_pickup, agent.next_drop))
             agent.state = "idle"
             return
 
         # 2️⃣ arrived at shelf → pick + plan drop
         if agent.state == "to_pickup" and not agent.path:
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: ARRIVED at pickup {agent.current_pickup}")
-            itm = self.item_agents[agent.current_pickup].pop()
+            # print(f"[DEBUG][{now}] Agent {agent.unique_id}: ARRIVED at pickup {agent.current_pickup}")
+            # make sure there actually is an item waiting here
+            items_here = self.item_agents.get(agent.current_pickup, [])
+            if not items_here:
+                # nothing to pick up — drop this task and go idle
+                # (or you could re-queue it for later)
+                print(f"[WARN][{self.schedule.time}] Agent {agent.unique_id} at {agent.current_pickup} but no items to pick")
+                agent.state = "idle"
+                return
+            itm = items_here.pop()
             self.grid.remove_agent(itm)
             self.items[agent.current_pickup] -= 1
             agent.path = self.compute_path_to_drop(agent.pos, agent.next_drop)
             agent.state = "to_dropoff"
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, new path_len={len(agent.path)}")
+            # print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, new path_len={len(agent.path)}")
             return
 
         # 3️⃣ arrived at drop → record + staging + schedule respawn
         if agent.state == "to_dropoff" and not agent.path:
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: ARRIVED at drop {agent.next_drop}")
+            # print(f"[DEBUG][{now}] Agent {agent.unique_id}: ARRIVED at drop {agent.next_drop}")
             if self.respawn_enabled:
                 # enqueue this shelf cell for a delayed respawn
-                respawn_time = now + self.item_respawn_delay
+                respawn_time = self.ticks + self.item_respawn_delay
+                # print(f"[DEBUG][{now}]    → enqueueing respawn of shelf {agent.current_pickup} at t={respawn_time}")
                 self.respawn_queue.append((agent.current_pickup, respawn_time))
-                print(f"[DEBUG][{now}]   scheduled respawn of {agent.current_pickup} at t={respawn_time}")
+                # print(f"[DEBUG][{now}]   scheduled respawn of {agent.current_pickup} at t={respawn_time}")
 
             self.total_task_steps += agent.task_steps
             agent.task_steps = 0
@@ -928,12 +938,12 @@ class WarehouseEnvModel(Model):
             staging = self.random_empty_cell()
             agent.path = self.compute_path(agent.pos, staging)
             agent.state = "relocating"
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, "
-                f"staging at {staging}, path_len={len(agent.path)}")
+            # print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, "
+            #    f"staging at {staging}, path_len={len(agent.path)}")
             return
 
         # 4️⃣ finished staging → go idle
         if agent.state == "relocating" and not agent.path:
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: finished relocating, going idle")
+            # print(f"[DEBUG][{now}] Agent {agent.unique_id}: finished relocating, going idle")
             agent.state = "idle"
             return
