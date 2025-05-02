@@ -330,10 +330,13 @@ class WarehouseEnvModel(Model):
         if self.respawn_enabled:
             while self.respawn_queue and self.respawn_queue[0][1] <= now:
                 shelf_pos, _ = self.respawn_queue.popleft()
+                # spawn new item agent
                 new_item = ShelfItem(self)
                 self.grid.place_agent(new_item, shelf_pos)
+                # update counts
                 self.items[shelf_pos] = self.items.get(shelf_pos, 0) + 1
                 self.item_agents[shelf_pos].append(new_item)
+                # add a new pickup→drop task
                 self.tasks.append((shelf_pos, self.random.choice(self.drop_coords)))
                 print(f"[DEBUG][{now}] Respawned item at {shelf_pos}")
 
@@ -399,6 +402,7 @@ class WarehouseEnvModel(Model):
 
         # 8️⃣ Collect data & increment tick
         self.collect_tick_data()
+
 
 
     def _update_agent_field(self):
@@ -907,20 +911,25 @@ class WarehouseEnvModel(Model):
             print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, new path_len={len(agent.path)}")
             return
 
-        # 3️⃣ arrived at drop → record + staging
+        # 3️⃣ arrived at drop → record + staging + schedule respawn
         if agent.state == "to_dropoff" and not agent.path:
             print(f"[DEBUG][{now}] Agent {agent.unique_id}: ARRIVED at drop {agent.next_drop}")
             if self.respawn_enabled:
-                self.respawn_queue.append((agent.current_pickup, now + self.item_respawn_delay))
-                print(f"[DEBUG][{now}]   scheduled respawn of {agent.current_pickup} at t={now + self.item_respawn_delay}")
+                # enqueue this shelf cell for a delayed respawn
+                respawn_time = now + self.item_respawn_delay
+                self.respawn_queue.append((agent.current_pickup, respawn_time))
+                print(f"[DEBUG][{now}]   scheduled respawn of {agent.current_pickup} at t={respawn_time}")
+
             self.total_task_steps += agent.task_steps
             agent.task_steps = 0
             agent.deliveries += 1
             self.total_deliveries += 1
+
             staging = self.random_empty_cell()
             agent.path = self.compute_path(agent.pos, staging)
             agent.state = "relocating"
-            print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, staging at {staging}, path_len={len(agent.path)}")
+            print(f"[DEBUG][{now}] Agent {agent.unique_id}: {prev_state} → {agent.state}, "
+                f"staging at {staging}, path_len={len(agent.path)}")
             return
 
         # 4️⃣ finished staging → go idle
