@@ -47,6 +47,7 @@ class WarehouseEnvModel(Model):
         self.respawn_enabled = respawn_enabled
         self.respawn_queue: deque[tuple[tuple[int, int], int]] = deque()
         self.max_steps = max_steps
+        self.path_cache: dict[tuple[tuple[int,int],tuple[int,int]], list[tuple[int,int]]] = {}
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
@@ -248,6 +249,9 @@ class WarehouseEnvModel(Model):
         4) Assign new tasks according to strategy.
         5) Evaporate pheromones & collect end-of-tick data.
         """
+        
+        # Clear cache at start of each tick:
+        self.path_cache.clear()
         
         # Handle automatic exiting of the program once max_steps has been reached:
         if self.max_steps is not None and self.schedule.time >= self.max_steps:
@@ -821,9 +825,16 @@ class WarehouseEnvModel(Model):
         """
         if start == goal:
             return []
+        
+        # Check cache first:
+        cache_key = (start, goal)
+        if cache_key in self.path_cache:
+            # Return a copy to avoid in-place edits:
+            return list(self.path_cache[cache_key])
 
         # Starting time-layer
         start_time = self.schedule.time
+            
         # open_set holds tuples (f_score, (x, y, t))
         open_set = []
         heapq.heappush(open_set, (self._heuristic(start, goal), (start[0], start[1], start_time)))
@@ -837,7 +848,7 @@ class WarehouseEnvModel(Model):
                 break
 
             for nbr in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
-                nx, ny = nbr
+                nx, ny = nbr                
                 nt = t + 1
                 # Skip reserved cells at time nt
                 if hasattr(self, 'reservations') and (nx, ny, nt) in self.reservations:
@@ -864,6 +875,9 @@ class WarehouseEnvModel(Model):
             path.append((node[0], node[1]))
             node = came_from[node]
         path.reverse()
+        
+        # Store in cache before returning:
+        self.path_cache[cache_key] = list(path)
         return path
 
     def random_empty_cell(self):
