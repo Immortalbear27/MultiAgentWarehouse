@@ -10,8 +10,6 @@ import heapq
 from math import inf
 from scipy.optimize import linear_sum_assignment
 
-
-
 class WarehouseEnvModel(Model):
     """
     Warehouse with static shelves/drop‐zones + one moving agent.
@@ -31,7 +29,7 @@ class WarehouseEnvModel(Model):
         auction_radius = 10,
         item_respawn_delay = 50,
         respawn_enabled = True,
-        max_steps = 500,
+        max_steps = 100,
         seed = None
     ):
         super().__init__(seed=seed)
@@ -48,6 +46,7 @@ class WarehouseEnvModel(Model):
         self.respawn_queue: deque[tuple[tuple[int, int], int]] = deque()
         self.max_steps = max_steps
         self.path_cache: dict[tuple[tuple[int,int],tuple[int,int]], list[tuple[int,int]]] = {}
+        self.reservations: dict[tuple[int,int,int], int] = {}
         
         # Initialise the grid and scheduler:
         self.grid     = MultiGrid(width, height, torus=False)
@@ -107,6 +106,9 @@ class WarehouseEnvModel(Model):
         
         # Initialise the drop zone agents:
         self.drop_coords = self.create_drop_zones(drop_coords)
+        
+        # Compute the full grid for more efficient path finding calculations later on:
+        self.compute_drop_zone_distances()
             
         # 5️⃣ Initialize items: 1 item per shelf cell:        
         self.items, self.item_agents = self.create_items(self.shelf_coords)
@@ -129,6 +131,147 @@ class WarehouseEnvModel(Model):
             # Round-robin assignment:
             robot = self.robots[idx % len(self.robots)]
             self.swarm_tasks[robot].append(task)
+
+    def compute_drop_zone_distances(self):
+        """
+        Multi-source BFS from all drop-zone cells to compute
+        `self.static_dist[(x,y)] = d`, the (unweighted) grid‐distance
+        from (x,y) to the nearest drop-zone, ignoring robots/reservations.
+        """
+        self.static_dist: dict[tuple[int,int], int] = {
+            (x, y): inf
+            for x in range(self.width)
+            for y in range(self.height)
+        }
+        queue = deque()
+
+        # Seed the queue with drop-zone cells at distance 0
+        for dz in self.drop_coords:
+            self.static_dist[dz] = 0
+            queue.append(dz)
+
+        # 4-way grid BFS
+        while queue:
+            x, y = queue.popleft()
+            d0   = self.static_dist[(x, y)]
+            for nx, ny in self.grid.get_neighborhood((x, y),
+                                                     moore=False,
+                                                     include_center=False):
+                # Skip shelves (static obstacles)
+                if any(isinstance(o, Shelf) for o in self.grid.get_cell_list_contents([(nx, ny)])):
+                    continue
+                if self.static_dist[(nx, ny)] > d0 + 1:
+                    self.static_dist[(nx, ny)] = d0 + 1
+                    queue.append((nx, ny))
+                    
+    def compute_path_to_drop(self, start: tuple[int,int], goal: tuple[int,int]) -> list[tuple[int,int]]:
+        """
+        Greedy, reservation-aware walk from start → goal along the static_dist gradient.
+        Falls back to full A* only if blocked.
+        """
+        
+        # ensure the dict exists
+        if not hasattr(self, "reservations"):
+            self.reservations = {}
+        
+        path: list[tuple[int,int]] = []
+        x0, y0 = start
+        t = self.schedule.time
+
+        # Safety: if goal not a drop-zone, don’t use greedy
+        if goal not in self.drop_coords:
+            return self.compute_path(start, goal)
+
+        while (x0, y0) != goal:
+            # Among the 4 neighbours, pick the one that strictly decreases distance
+            nbrs = self.grid.get_neighborhood((x0, y0),
+                                              moore=False,
+                                              include_center=False)
+            # Filter passable and unreserved at time t+1
+            candidates = [
+                (nx, ny)
+                for nx, ny in nbrs
+                if self.static_dist.get((nx, ny), inf) < self.static_dist[(x0, y0)]
+                and (nx, ny, t+1) not in getattr(self, "reservations", {})
+                and self._is_passable((nx, ny), goal)
+            ]
+            if not candidates:
+                # Blocked: fallback to full A*
+                return self._full_a_star(start, goal)
+
+            # Pick the neighbour with minimal static distance
+            x1, y1 = min(candidates, key=lambda c: self.static_dist[c])
+            path.append((x1, y1))
+            # Reserve it
+            self.reservations[(x1, y1, t+1)] = None
+            # Advance
+            x0, y0, t = x1, y1, t+1
+
+        return path
+
+    def _full_a_star(self, start, goal):
+        """
+        Time-space reservation-aware A* search from start to goal.
+        Avoids shelves, robots, and reserved future cells.
+        Returns list of coords excluding start.
+        """
+        if start == goal:
+            return []
+        
+        # Check cache first:
+        cache_key = (start, goal)
+        if cache_key in self.path_cache:
+            # Return a copy to avoid in-place edits:
+            return list(self.path_cache[cache_key])
+
+        # Starting time-layer
+        start_time = self.schedule.time
+            
+        # open_set holds tuples (f_score, (x, y, t))
+        open_set = []
+        heapq.heappush(open_set, (self._heuristic(start, goal), (start[0], start[1], start_time)))
+        came_from: dict[tuple[int,int,int], tuple[int,int,int]] = {}
+        g_score = {(start[0], start[1], start_time): 0}
+
+        while open_set:
+            _, (x, y, t) = heapq.heappop(open_set)
+            if (x, y) == goal:
+                goal_time = t
+                break
+
+            for nbr in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
+                nx, ny = nbr                
+                nt = t + 1
+                # Skip reserved cells at time nt
+                if hasattr(self, 'reservations') and (nx, ny, nt) in self.reservations:
+                    # reservation-aware: cannot enter this cell at this time
+                    continue
+                # Skip impassable by original logic
+                if not self._is_passable((nx, ny), goal):
+                    continue
+                tentative_g = g_score[(x, y, t)] + 1
+                key = (nx, ny, nt)
+                if tentative_g < g_score.get(key, inf):
+                    came_from[key] = (x, y, t)
+                    g_score[key] = tentative_g
+                    f_score = tentative_g + self._heuristic((nx, ny), goal)
+                    heapq.heappush(open_set, (f_score, key))
+        else:
+            # No path found
+            return []
+
+        # Reconstruct path from goal_time back to start
+        path: list[tuple[int,int]] = []
+        node = (goal[0], goal[1], goal_time)
+        while (node[0], node[1], node[2]) != (start[0], start[1], start_time):
+            path.append((node[0], node[1]))
+            node = came_from[node]
+        path.reverse()
+        
+        # Store in cache before returning:
+        self.path_cache[cache_key] = list(path)
+        return path
+
 
     def spawn_robots(self, num_agents: int) -> list[WarehouseAgent]:
         """
@@ -506,7 +649,7 @@ class WarehouseEnvModel(Model):
                 item = self.item_agents[agent.current_pickup].pop()
                 self.grid.remove_agent(item)
                 self.items[agent.current_pickup] -= 1
-                agent.path  = self.compute_path(agent.pos, agent.next_drop)
+                agent.path  = self.compute_path_to_drop(agent.pos, agent.next_drop)
                 agent.state = "to_dropoff"
 
             # ❸ Arrived at drop zone → record & plan vacate
@@ -609,7 +752,7 @@ class WarehouseEnvModel(Model):
             # to_dropoff: direct path to drop
             elif agent.state == 'to_dropoff':
                 if not getattr(agent, 'full_path', None):
-                    agent.full_path = self.compute_path(agent.pos, agent.next_drop)
+                    agent.full_path = self.compute_path_to_drop(agent.pos, agent.next_drop)
                 if agent.full_path:
                     nxt = agent.full_path.pop(0)
                     self.reservations[(nxt[0], nxt[1], now+1)] = agent.unique_id
@@ -726,7 +869,11 @@ class WarehouseEnvModel(Model):
                 goal = agent.pickup_pos if agent.state=='to_pickup' else agent.next_drop
                 # compute full path once
                 if not getattr(agent, 'full_path', None) or agent.pos == getattr(agent, 'last_goal', None):
-                    agent.full_path = self.compute_path(agent.pos, goal)
+                    # use full A* for pickups, greedy precomputed map for dropoffs
+                    if agent.state == 'to_pickup':
+                        agent.full_path = self.compute_path(agent.pos, goal)
+                    else:  # to_dropoff
+                        agent.full_path = self.compute_path_to_drop(agent.pos, goal)
                     agent.last_goal = goal
                 # if still path remains
                 if agent.full_path:
