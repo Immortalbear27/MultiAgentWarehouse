@@ -157,11 +157,10 @@ class WarehouseEnvModel(Model):
     def compute_path_to_drop(self, start: tuple[int,int], goal: tuple[int,int]) -> list[tuple[int,int]]:
         """
         Greedy, reservation-aware walk from start → goal along the static_dist gradient.
-        Falls back to full A* only if blocked.
+        Falls back to full A* only if blocked.  Caps the loop to avoid infinite cycling.
         """
         now = self.schedule.time
         print(f"[DEBUG][{now}] compute_path_to_drop START from {start} to {goal}")
-        loop_count = 0
 
         if goal not in self.drop_coords:
             print(f"[DEBUG][{now}]  → goal not in drop_coords, fallback to full A*")
@@ -170,37 +169,37 @@ class WarehouseEnvModel(Model):
         path = []
         x0, y0 = start
         t = now
+        loop_count = 0
+        max_loops = self.width * self.height * 4
 
         while (x0, y0) != goal:
             loop_count += 1
             if loop_count % 50 == 0:
-                print(f"[DEBUG][{now}]   compute_path_to_drop loop #{loop_count}, at {(x0,y0)}")
+                print(f"[DEBUG][{now}]   compute_path_to_drop loop #{loop_count} at {(x0,y0)}")
+            if loop_count > max_loops:
+                print(f"[ERROR][{now}] compute_path_to_drop aborted after {loop_count} loops")
+                return []
 
-            nbrs = self.grid.get_neighborhood((x0, y0),
-                                              moore=False,
-                                              include_center=False)
+            nbrs = self.grid.get_neighborhood((x0, y0), moore=False, include_center=False)
             candidates = [
-                (nx, ny)
-                for nx, ny in nbrs
+                (nx, ny) for nx, ny in nbrs
                 if self.static_dist.get((nx, ny), inf) < self.static_dist[(x0, y0)]
-                and (nx, ny, t+1) not in self.reservations
+                and not isinstance(self.reservations.get((nx, ny, t+1)), int)
                 and self._is_passable((nx, ny), goal)
             ]
             if not candidates:
-                print(f"[DEBUG][{now}]   blocked at {(x0,y0)}; fallback to full A* after {loop_count} iters")
+                print(f"[DEBUG][{now}]   blocked at {(x0,y0)}; fallback to full A* after {loop_count} loops")
                 return self.compute_path(start, goal)
 
             x1, y1 = min(candidates, key=lambda c: self.static_dist[c])
             path.append((x1, y1))
+            # Use None placeholder reservation (now treated as non-blocking in A*)
             self.reservations[(x1, y1, t+1)] = None
-            x0, y0, t = x1, y1, t+1
-
-            if loop_count > (self.width*self.height*4):
-                print(f"[ERROR][{now}] compute_path_to_drop exceeded safe loop count, aborting")
-                return []
+            x0, y0, t = x1, y1, t + 1
 
         print(f"[DEBUG][{now}] compute_path_to_drop END (length={len(path)}, loops={loop_count})")
         return path
+
 
     def spawn_robots(self, num_agents: int) -> list[WarehouseAgent]:
         """
@@ -766,40 +765,39 @@ class WarehouseEnvModel(Model):
                 return False
         return True
 
-    def compute_path(
-        self,
-        start: tuple[int,int],
-        goal:  tuple[int,int]
-    ) -> list[tuple[int,int]]:
+    def compute_path(self, start: tuple[int,int], goal: tuple[int,int]) -> list[tuple[int,int]]:
         """
         Time-space reservation-aware A* search from start to goal.
         Avoids shelves, robots, and reserved future cells.
+        Aborts after a fixed maximum number of expansions.
         """
         now = self.schedule.time
         print(f"[DEBUG][{now}] compute_path START from {start} to {goal}")
-        expansions = 0
 
         if start == goal:
-            print(f"[DEBUG][{now}]  → start==goal, returning []")
             return []
 
         cache_key = (start, goal)
         if cache_key in self.path_cache:
-            print(f"[DEBUG][{now}]  → HIT cache, length {len(self.path_cache[cache_key])}")
             return list(self.path_cache[cache_key])
 
+        # Initialize
         start_time = now
-        # ... [your bounding‐box code here] ...
-
         open_set = []
         heapq.heappush(open_set, (self._heuristic(start, goal), (start[0], start[1], start_time)))
         came_from = {}
-        g_score = {(start[0], start[1], start_time): 0}
+        g_score = { (start[0], start[1], start_time): 0 }
+
+        expansions = 0
+        max_expansions = self.width * self.height * 4
 
         while open_set:
             expansions += 1
             if expansions % 500 == 0:
-                print(f"[DEBUG][{now}]   A* expansions={expansions}, open_set size={len(open_set)}")
+                print(f"[DEBUG][{now}] A* expansions={expansions}, open_set size={len(open_set)}")
+            if expansions > max_expansions:
+                print(f"[ERROR][{now}] A* aborted after {expansions} expansions")
+                return []
 
             _, (x, y, t) = heapq.heappop(open_set)
             if (x, y) == goal:
@@ -807,19 +805,19 @@ class WarehouseEnvModel(Model):
                 break
 
             for nx, ny in self._allowed_neighbors(x, y, t, goal):
-                # ... [your reservation + passable checks] ...
+                nt = t + 1
                 tentative_g = g_score[(x, y, t)] + 1
-                key = (nx, ny, t+1)
+                key = (nx, ny, nt)
                 if tentative_g < g_score.get(key, inf):
                     came_from[key] = (x, y, t)
                     g_score[key] = tentative_g
                     f_score = tentative_g + self._heuristic((nx, ny), goal)
                     heapq.heappush(open_set, (f_score, key))
         else:
-            print(f"[DEBUG][{now}]  → A* failed to find path after {expansions} expansions")
+            print(f"[DEBUG][{now}] A* failed to find path after {expansions} expansions")
             return []
 
-        # Reconstruct
+        # Reconstruct path
         path = []
         node = (goal[0], goal[1], goal_time)
         while (node[0], node[1], node[2]) != (start[0], start[1], start_time):
@@ -831,6 +829,7 @@ class WarehouseEnvModel(Model):
         self.path_cache[cache_key] = list(path)
         return path
 
+
     def random_empty_cell(self):
         while True:
             x = self.random.randrange(self.grid.width)
@@ -840,33 +839,40 @@ class WarehouseEnvModel(Model):
                 return x, y
             
     def _allowed_neighbors(self, x: int, y: int, t: int, goal: tuple[int,int] | None = None) -> list[tuple[int,int]]:
-        # 1) bounding‐box (unchanged) …
+        """
+        Return all 4-way neighbours of (x,y) at time t+1 that
+        1) lie within the optional search_radius bounding box,
+        2) aren’t reserved by *another* agent at t+1,
+        3) are passable (unless they’re the specified goal).
+        """
+        # 1) bounding‐box:
         if self.search_radius is not None:
             sr = self.search_radius
-            x_min = max(min(x, goal[0] if goal else x) - sr, 0)
-            x_max = min(max(x, goal[0] if goal else x) + sr, self.width - 1)
-            y_min = max(min(y, goal[1] if goal else y) - sr, 0)
-            y_max = min(max(y, goal[1] if goal else y) + sr, self.height - 1)
+            x_min = max(min(x, (goal or (x,y))[0]) - sr, 0)
+            x_max = min(max(x, (goal or (x,y))[0]) + sr, self.width - 1)
+            y_min = max(min(y, (goal or (x,y))[1]) - sr, 0)
+            y_max = min(max(y, (goal or (x,y))[1]) + sr, self.height - 1)
         else:
-            x_min, x_max, y_min, y_max = 0, self.width - 1, 0, self.height - 1
+            x_min, x_max, y_min, y_max = 0, self.width-1, 0, self.height-1
 
         out = []
         for nx, ny in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
+            # 1) within box?
             if not (x_min <= nx <= x_max and y_min <= ny <= y_max):
                 continue
 
-            # block if *someone else* reserved it for t+1
-            res = self.reservations.get((nx, ny, t + 1))
-            if res is not None and res != getattr(self, 'current_agent', None):
+            # 2) block only if reserved by another agent (an int)
+            res = self.reservations.get((nx, ny, t+1))
+            if isinstance(res, int):
                 continue
 
-            # passability (unchanged)
+            # 3) passable (or it’s the goal cell)
             if not self._is_passable((nx, ny), goal):
                 continue
 
             out.append((nx, ny))
 
-        # debug if you want to see why it’s empty
+        # debug if completely blocked
         if not out:
             nbrs = self.grid.get_neighborhood((x, y), moore=False, include_center=False)
             blocked = [(pos, self.reservations.get((pos[0], pos[1], t+1))) for pos in nbrs]

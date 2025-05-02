@@ -55,13 +55,18 @@ class WarehouseAgent(Agent):
         Recompute path around the current target.
         """
         goal = self.pickup_pos if self.state == 'to_pickup' else self.next_drop
+        cache_key = (self.pos, goal)
+        if cache_key in self.model.path_cache:
+            del self.model.path_cache[cache_key]
         new_path = self.model.compute_path(self.pos, goal)
         # If we’re on the “to_dropoff” leg, never A*—use compute_path_to_drop
         if getattr(self, "state", None) == "to_dropoff" and goal in self.model.drop_coords:
+            self.path.clear()
             new_path = self.model.compute_path_to_drop(self.pos, goal)
         else:
+            self.path.clear()
             new_path = self.model.compute_path(self.pos, goal)
-        self.path = new_path
+        self.path.extend(new_path)
 
 
 class ShelfItem(Agent):
