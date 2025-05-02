@@ -65,7 +65,7 @@ def Page():
                                    aisle_interval = 6, 
                                    num_agents = 5,
                                    drop_zone_size = 2,
-                                   max_steps = 100,
+                                   max_steps = 1000,
                                    search_radius = 3)
 
     # 2️⃣ Wrap it in Solara’s reactive system
