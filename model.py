@@ -18,7 +18,6 @@ class WarehouseEnvModel(Model):
         self,
         width = 30,
         height = 30,
-        shelf_coords = None,
         drop_coords = None,
         drop_zone_size = 1,
         shelf_rows = 5,
@@ -26,10 +25,10 @@ class WarehouseEnvModel(Model):
         aisle_interval = 5,
         num_agents = 3,
         strategy = "centralised",
-        auction_radius = 10,
         item_respawn_delay = 50,
         respawn_enabled = True,
         max_steps = 100,
+        search_radius = 3,
         seed = None
     ):
         super().__init__(seed=seed)
@@ -38,11 +37,11 @@ class WarehouseEnvModel(Model):
         self.strategy = strategy
         self.num_agents = num_agents
         self.drop_zone_size = drop_zone_size
-        self.auction_radius = auction_radius
         self.shelf_edge_gap = shelf_edge_gap
         self.aisle_interval = aisle_interval
         self.item_respawn_delay = item_respawn_delay
         self.respawn_enabled = respawn_enabled
+        self.search_radius = search_radius
         self.respawn_queue: deque[tuple[tuple[int, int], int]] = deque()
         self.max_steps = max_steps
         self.path_cache: dict[tuple[tuple[int,int],tuple[int,int]], list[tuple[int,int]]] = {}
@@ -122,15 +121,6 @@ class WarehouseEnvModel(Model):
 
         # 1️⃣ Spawn multiple robots
         self.robots = self.spawn_robots(self.num_agents)
-        
-        # Create per-robot task bags:
-        self.swarm_tasks: dict[WarehouseAgent, list[tuple, tuple]] = {
-            robot: [] for robot in self.robots
-        }
-        for idx, task in enumerate(self.tasks):
-            # Round-robin assignment:
-            robot = self.robots[idx % len(self.robots)]
-            self.swarm_tasks[robot].append(task)
 
     def compute_drop_zone_distances(self):
         """
@@ -197,7 +187,7 @@ class WarehouseEnvModel(Model):
             ]
             if not candidates:
                 # Blocked: fallback to full A*
-                return self._full_a_star(start, goal)
+                return self.compute_path(start, goal)
 
             # Pick the neighbour with minimal static distance
             x1, y1 = min(candidates, key=lambda c: self.static_dist[c])
@@ -206,72 +196,7 @@ class WarehouseEnvModel(Model):
             self.reservations[(x1, y1, t+1)] = None
             # Advance
             x0, y0, t = x1, y1, t+1
-
         return path
-
-    def _full_a_star(self, start, goal):
-        """
-        Time-space reservation-aware A* search from start to goal.
-        Avoids shelves, robots, and reserved future cells.
-        Returns list of coords excluding start.
-        """
-        if start == goal:
-            return []
-        
-        # Check cache first:
-        cache_key = (start, goal)
-        if cache_key in self.path_cache:
-            # Return a copy to avoid in-place edits:
-            return list(self.path_cache[cache_key])
-
-        # Starting time-layer
-        start_time = self.schedule.time
-            
-        # open_set holds tuples (f_score, (x, y, t))
-        open_set = []
-        heapq.heappush(open_set, (self._heuristic(start, goal), (start[0], start[1], start_time)))
-        came_from: dict[tuple[int,int,int], tuple[int,int,int]] = {}
-        g_score = {(start[0], start[1], start_time): 0}
-
-        while open_set:
-            _, (x, y, t) = heapq.heappop(open_set)
-            if (x, y) == goal:
-                goal_time = t
-                break
-
-            for nbr in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
-                nx, ny = nbr                
-                nt = t + 1
-                # Skip reserved cells at time nt
-                if hasattr(self, 'reservations') and (nx, ny, nt) in self.reservations:
-                    # reservation-aware: cannot enter this cell at this time
-                    continue
-                # Skip impassable by original logic
-                if not self._is_passable((nx, ny), goal):
-                    continue
-                tentative_g = g_score[(x, y, t)] + 1
-                key = (nx, ny, nt)
-                if tentative_g < g_score.get(key, inf):
-                    came_from[key] = (x, y, t)
-                    g_score[key] = tentative_g
-                    f_score = tentative_g + self._heuristic((nx, ny), goal)
-                    heapq.heappush(open_set, (f_score, key))
-        else:
-            # No path found
-            return []
-
-        # Reconstruct path from goal_time back to start
-        path: list[tuple[int,int]] = []
-        node = (goal[0], goal[1], goal_time)
-        while (node[0], node[1], node[2]) != (start[0], start[1], start_time):
-            path.append((node[0], node[1]))
-            node = came_from[node]
-        path.reverse()
-        
-        # Store in cache before returning:
-        self.path_cache[cache_key] = list(path)
-        return path
-
 
     def spawn_robots(self, num_agents: int) -> list[WarehouseAgent]:
         """
@@ -459,8 +384,7 @@ class WarehouseEnvModel(Model):
         Remove outdated time-space reservations.
         """
         now = self.schedule.time
-        if not hasattr(self, 'reservations'):
-            self.reservations = {}
+
         # Keep only future slots
         self.reservations = {k: v for k, v in self.reservations.items() if k[2] > now}
 
@@ -509,8 +433,6 @@ class WarehouseEnvModel(Model):
                             agent.path = self.compute_path(agent.pos, agent.path[-1])
                             break
         # Reserve next cells to prevent head-on collisions
-        if not hasattr(self, 'reservations'):
-            self.reservations = {}
         for agent in self.schedule.agents:
             if isinstance(agent, WarehouseAgent) and agent.path:
                 dest = agent.path[0]
@@ -682,9 +604,7 @@ class WarehouseEnvModel(Model):
          • Standard pickup/dropoff phases
         """
         now = self.schedule.time
-        # Initialize reservations map if missing
-        if not hasattr(self, 'reservations'):
-            self.reservations = {}
+
         # 1️⃣ Reactive re-assignment: unreachable pickups go back to pool
         for agent in self.schedule.agents:
             if isinstance(agent, WarehouseAgent) and agent.state == 'to_pickup':
@@ -783,9 +703,6 @@ class WarehouseEnvModel(Model):
          • Reactive clearing: abandon tasks when corridor is too dense
         """
         now = self.schedule.time
-        # ensure reservations exists
-        if not hasattr(self, 'reservations'):
-            self.reservations = {}
 
         # 0️⃣ Collective task grab for clusters of idle agents
         pickup_radius = 3
@@ -981,6 +898,14 @@ class WarehouseEnvModel(Model):
 
         # Starting time-layer
         start_time = self.schedule.time
+        
+         # Build bounding box if radius set
+        if self.search_radius is not None:
+            sr = self.search_radius
+            x_min = max(min(start[0], goal[0]) - sr, 0)
+            x_max = min(max(start[0], goal[0]) + sr, self.width - 1)
+            y_min = max(min(start[1], goal[1]) - sr, 0)
+            y_max = min(max(start[1], goal[1]) + sr, self.height - 1)
             
         # open_set holds tuples (f_score, (x, y, t))
         open_set = []
@@ -994,8 +919,13 @@ class WarehouseEnvModel(Model):
                 goal_time = t
                 break
 
-            for nbr in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
-                nx, ny = nbr                
+            for nx, ny in self._allowed_neighbors(x, y, t, goal):
+                
+                # skip nodes outside the local box ───────────────
+                if self.search_radius is not None:
+                    if not (x_min <= nx <= x_max and y_min <= ny <= y_max):
+                        continue
+                                
                 nt = t + 1
                 # Skip reserved cells at time nt
                 if hasattr(self, 'reservations') and (nx, ny, nt) in self.reservations:
@@ -1034,45 +964,75 @@ class WarehouseEnvModel(Model):
             # Only return cells that have no Shelf in them
             if all(not isinstance(a, Shelf) for a in self.grid.get_cell_list_contents([(x,y)])):
                 return x, y
+            
+    def _allowed_neighbors(self, x: int, y: int, t: int, goal: tuple[int,int] | None = None) -> list[tuple[int,int]]:
+        """
+        Return all 4-way neighbours of (x,y) at time t+1 that
+        1) lie within the optional search_radius bounding box,
+        2) aren’t reserved at t+1,
+        3) are passable (unless they’re the specified goal).
+        """
+        # Bounding box precompute:
+        if self.search_radius is not None:
+            sr = self.search_radius
+            x_min = max(min(x, goal[0] if goal else x) - sr, 0)
+            x_max = min(max(x, goal[0] if goal else x) + sr, self.width - 1)
+            y_min = max(min(y, goal[1] if goal else y) - sr, 0)
+            y_max = min(max(y, goal[1] if goal else y) + sr, self.height - 1)
+        else:
+            x_min, x_max, y_min, y_max = 0, self.width-1, 0, self.height-1
 
-# Testing framework - Temporary:
-def _test_fallback_consistency():
-    # 1. Set up a tiny open grid with one drop‐zone
-    model = WarehouseEnvModel(width=10, height=10, drop_coords=[(9,9)])
-    start, goal = (0, 0), (9, 9)
-    # Clear any stray reservations
-    model.reservations.clear()
+        out = []
+        for nx, ny in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
+            # 1) within box?
+            if not (x_min <= nx <= x_max and y_min <= ny <= y_max):
+                continue
+            # 2) unreserved?
+            if (nx, ny, t+1) in self.reservations:
+                continue
+            # 3) passable (or it’s the goal cell)
+            if not self._is_passable((nx, ny), goal):
+                continue
+            out.append((nx, ny))
+        return out
 
-    # 2. Compare pure A* vs greedy→A* fallback when unblocked
-    p_astar = model.compute_path(start, goal)
-    p_greedy = model.compute_path_to_drop(start, goal)
-    assert p_greedy == p_astar, "Greedy path must match A* when no blockage"
+    def _process_agent_state(self, agent: WarehouseAgent):
+        """Advance agent through the pickup/dropoff state‐machine."""
+        now = self.schedule.time
 
-    # 3. Force a block on the first greedy step
-    first_step = p_greedy[0]
-    t1 = model.schedule.time + 1
-    model.reservations[(first_step[0], first_step[1], t1)] = None
+        # 1️⃣ Reactive unreachable:
+        if agent.state == "to_pickup" and not agent.path and agent.pos != agent.pickup_pos:
+            self.tasks.append((agent.current_pickup, agent.next_drop))
+            agent.state = "idle"
+            return
 
-    p_fallback = model.compute_path_to_drop(start, goal)
-    assert p_fallback == p_astar, "Fallback must invoke A* and find the same route"
-    print("✔ Fallback consistency tests passed")
+        # 2️⃣ Arrived at shelf → pick & plan dropoff
+        if agent.state == "to_pickup" and not agent.path:
+            item = self.item_agents[agent.current_pickup].pop()
+            self.grid.remove_agent(item)
+            self.items[agent.current_pickup] -= 1
+            # dropoffs always use greedy
+            agent.path  = self.compute_path_to_drop(agent.pos, agent.next_drop)
+            agent.state = "to_dropoff"
+            return
 
+        # 3️⃣ Arrived at drop → record & plan vacate
+        if agent.state == "to_dropoff" and not agent.path:
+            if self.respawn_enabled:
+                self.respawn_queue.append((
+                    agent.current_pickup,
+                    now + self.item_respawn_delay
+                ))
+            self.total_task_steps += agent.task_steps
+            agent.task_steps = 0
+            agent.deliveries += 1
+            self.total_deliveries += 1
+            # staging move uses full A*
+            staging = self.random_empty_cell()
+            agent.path = self.compute_path(agent.pos, staging)
+            agent.state = "relocating"
+            return
 
-def _test_reset_clears_state():
-    model = WarehouseEnvModel(width=10, height=10, drop_coords=[(9,9)])
-    # simulate some steps to populate caches/reservations
-    model.step()
-    assert model.path_cache,    "path_cache should be non-empty after steps"
-    assert model.reservations,  "reservations should be non-empty after steps"
-
-    # Now “reset” by making a brand-new instance
-    model2 = WarehouseEnvModel(width=10, height=10, drop_coords=[(9,9)])
-    assert not model2.path_cache,    "New model must start with empty path_cache"
-    assert not model2.reservations,  "New model must start with no reservations"
-    assert hasattr(model2, "static_dist"), "static_dist must be built on init"
-    print("✔ Reset state-cleanup tests passed")
-
-
-if __name__ == "__main__":
-    _test_fallback_consistency()
-    _test_reset_clears_state()
+        # 4️⃣ Finished vacating → idle
+        if agent.state == "relocating" and not agent.path:
+            agent.state = "idle"

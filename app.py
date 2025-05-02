@@ -65,8 +65,8 @@ def Page():
                                    aisle_interval = 6, 
                                    num_agents = 5,
                                    drop_zone_size = 2,
-                                   auction_radius = 10,
-                                   max_steps = 100)
+                                   max_steps = 100,
+                                   search_radius = 3)
 
     # 2️⃣ Wrap it in Solara’s reactive system
     reactive_model = sl.reactive(model_inst)
@@ -79,7 +79,6 @@ def Page():
         "shelf_edge_gap": Slider("Shelf Edge Gap", 2, 1, 5, step = 1),
         "aisle_interval": Slider("Aisle Interval", 6, 2, 10, step = 1),
         "drop_zone_size": Slider("Size of Drop Zones", 2, 1, 3, step = 1),
-        "auction_radius": Slider("Auction Radius", 10, 3, 25, step = 1),
         "item_respawn_delay": Slider("Item Respawn Delay", 50, 0, 200, step = 1),
         "strategy": {
             "type": "Select",

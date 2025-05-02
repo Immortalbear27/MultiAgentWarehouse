@@ -56,8 +56,12 @@ class WarehouseAgent(Agent):
         """
         goal = self.pickup_pos if self.state == 'to_pickup' else self.next_drop
         new_path = self.model.compute_path(self.pos, goal)
-        if new_path:
-            self.path = new_path
+        # If we’re on the “to_dropoff” leg, never A*—use compute_path_to_drop
+        if getattr(self, "state", None) == "to_dropoff" and goal in self.model.drop_coords:
+            new_path = self.model.compute_path_to_drop(self.pos, goal)
+        else:
+            new_path = self.model.compute_path(self.pos, goal)
+        self.path = new_path
 
 
 class ShelfItem(Agent):
