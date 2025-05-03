@@ -13,8 +13,8 @@ if __name__ == "__main__":
     results = batch_run(
         WarehouseEnvModel,
         parameters = variable_params,
-        iterations=5,
-        max_steps=250,
+        iterations=30,
+        max_steps=500,
         data_collection_period = 1,
         number_processes = None,
         display_progress = True
