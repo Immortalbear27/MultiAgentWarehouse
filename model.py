@@ -456,9 +456,11 @@ class WarehouseEnvModel(Model):
                 if b and b.path and b.path[0] == a.pos:
                     # a and b are swapping; lower‐id yields by removing its next step
                     if a.unique_id < b.unique_id:
-                        a.path.pop(0)
+                        if a.path:
+                            a.path.pop(0)
                     else:
-                        b.path.pop(0)       
+                        if b.path:
+                            b.path.pop(0)       
         
         for dest, colliders in intents.items():
             if len(colliders) > 1:

@@ -7,6 +7,10 @@ variable_params = {
     "num_agents":     [5,10,15,20],
     "shelf_edge_gap": [1,2,3],
     "aisle_interval": [5,10],
+    "shelf_rows": [3, 5, 7],
+    "width": [20, 30, 40],
+    "height": [20, 30, 40],
+    "search_radius": [1, 3, 5]
 }
 
 if __name__ == "__main__":
