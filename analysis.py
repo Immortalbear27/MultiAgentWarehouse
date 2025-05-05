@@ -4,71 +4,75 @@ import statsmodels.api as sm
 from statsmodels.formula.api import ols
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import scipy.stats as stats
 
-# 1. Load the simulation results
-df = pd.read_csv("_batch_results.csv")
+# 1. Load results
+df = pd.read_csv("batch_results.csv")
 
-# 2. Define a normalized efficiency metric
-#    Assumes "ticks" column records the number of steps actually simulated per run
-df["Efficiency"] = df["TotalDeliveries"] / (df["num_agents"] * df["ticks"])
+# 2. Compute efficiency metric: deliveries per agent per tick
+# assume column 'ticks' shows number of ticks until termination per run
+if 'ticks' not in df.columns:
+    df['ticks'] = df['Step']  # adapt if different
 
-# 3. Full-factorial ANOVA across all swept parameters
-formula = (
-    "Efficiency ~ "
-    "C(strategy) * C(num_agents) * C(shelf_rows) * "
-    "C(shelf_edge_gap) * C(aisle_interval) * C(search_radius)"
-)
+# Avoid zero ticks
+df['Efficiency'] = df['TotalDeliveries'] / (df['num_agents'] * df['ticks'].replace(0, np.nan))
+
+# 3. Descriptive statistics
+print("\n=== Descriptive Statistics by Strategy ===")
+desc = df.groupby('strategy')['Efficiency'].agg(['mean','std','count'])
+print(desc)
+
+# 4. Full-factorial ANOVA
+formula = ('Efficiency ~ C(strategy) + C(num_agents) + C(shelf_rows) '
+    '+ C(shelf_edge_gap) + C(aisle_interval) + C(search_radius) '
+    '+ C(strategy):C(num_agents)'
+    )
 model = ols(formula, data=df).fit()
 anova = sm.stats.anova_lm(model, typ=2)
-print("=== ANOVA Results ===")
+print("\n=== ANOVA Results ===")
 print(anova)
 
-# 4. Compute partial eta-squared for each effect
-ss_error = model.ssr
-anova["eta_sq"] = anova["sum_sq"] / (anova["sum_sq"] + ss_error)
+# 5. Compute partial eta-squared
+total_ss = sum(anova['sum_sq']) + model.ssr
+anova['eta_sq'] = anova['sum_sq'] / (anova['sum_sq'] + model.ssr)
 print("\n=== Partial Eta-Squared ===")
-print(anova["eta_sq"])
+print(anova['eta_sq'])
 
-# 5. Post-hoc Tukey HSD on strategy main effect
-tukey = pairwise_tukeyhsd(
-    endog=df["Efficiency"],
-    groups=df["strategy"],
-    alpha=0.05
-)
-print("\n=== Tukey HSD for Strategy ===")
-print(tukey.summary())
+# 6. Post-hoc: Tukey HSD for strategy
+tukey_strat = pairwise_tukeyhsd(df['Efficiency'], df['strategy'])
+print("\n=== Tukey HSD: Strategy ===")
+print(tukey_strat)
 
-# 6. Interaction plot: strategy vs. shelf_rows
-means = df.groupby(["shelf_rows", "strategy"])["Efficiency"].mean().unstack("strategy")
-means.plot(marker="o")
-plt.xlabel("Number of Shelf Rows")
-plt.ylabel("Efficiency (Deliveries per Agent per Tick)")
-plt.title("Strategy Performance vs Shelf Density")
-plt.grid(True)
-plt.show()
+# 7. Interaction plot: strategy × num_agents
+plt.figure()
+sns.pointplot(data=df, x='num_agents', y='Efficiency', hue='strategy', dodge=True)
+plt.title('Efficiency by Strategy and Number of Agents')
+plt.savefig('interaction_strategy_agents.png')
 
-# 7. Diagnostics: residual QQ-plot
-sm.qqplot(model.resid, line="45")
-plt.title("QQ-Plot of ANOVA Residuals")
-plt.show()
+# 8. Distribution plots
+plt.figure()
+sns.violinplot(data=df, x='strategy', y='Efficiency')
+plt.title('Efficiency Distribution by Strategy')
+plt.savefig('violin_strategy_efficiency.png')
 
-# 8. Diagnostics: Levene's test for equality of variances by strategy
-groups = [group["Efficiency"].values for name, group in df.groupby("strategy")]
-stat, pval = stats.levene(*groups)
-print(f"\nLevene's test for homogeneity of variances by strategy: stat={stat:.3f}, p={pval:.3f}")
+# 9. Residual diagnostics
+sm.qqplot(model.resid, line='45')
+plt.title('QQ-Plot of ANOVA Residuals')
+plt.savefig('qqplot_resid.png')
 
-# 9. (Optional) Repeat Tukey for other factors, e.g., num_agents
-tukey_agents = pairwise_tukeyhsd(
-    endog=df["Efficiency"],
-    groups=df["num_agents"].astype(str),
-    alpha=0.05
-)
-print("\n=== Tukey HSD for Number of Agents ===")
-print(tukey_agents.summary())
+# 10. Homogeneity test
+groups = [g['Efficiency'].dropna() for _,g in df.groupby('strategy')]
+stat, p = stats.levene(*groups)
+print(f"Levene's test: stat={stat:.3f}, p={p:.3f}")
 
-# 10. Save summary tables
-anova.to_csv("anova_summary.csv")
-tukey.summary().as_csv("tukey_strategy.csv")
-tukey_agents.summary().as_csv("tukey_num_agents.csv")
+# 11. Save summary
+anova.to_csv('anova_summary.csv')
+with open('tukey_strat.txt','w') as f:
+    f.write(str(tukey_strat))
 
+def main():
+    pass
+
+if __name__ == '__main__':
+    main()
