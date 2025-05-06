@@ -80,16 +80,17 @@ class WarehouseEnvModel(Model):
         # DataCollector reporters:
         self.datacollector = DataCollector(
             model_reporters={
-                "TotalDeliveries":      lambda m: m.total_deliveries,
+                "total_deliveries":      lambda m: m.total_deliveries,
+                "ticks": lambda m: m.ticks,
                 "AvgStepsPerDelivery":(
                     lambda m: m.total_task_steps / m.total_deliveries
                     if m.total_deliveries > 0 else 0
                 ),
-                "Collisions":      lambda m: m.collisions,
-                "PendingTasks":    lambda m: len(m.tasks),
+                "collisions":      lambda m: m.collisions,
+                "pendingtasks":    lambda m: len(m.tasks),
                 "AvgCongestion": (lambda m: m.congestion_accum / m.ticks 
                                   if m.ticks > 0 else 0),
-                "Energy": lambda m: m.total_task_steps
+                "total_task_steps": lambda m: m.total_task_steps
             }
         )
 

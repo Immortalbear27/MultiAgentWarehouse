@@ -1,78 +1,115 @@
+#!/usr/bin/env python3
+import argparse
+import os
+
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
-from statsmodels.formula.api import ols
-from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import scipy.stats as stats
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from statsmodels.stats.multicomp import MultiComparison
 
-# 1. Load results
-df = pd.read_csv("batch_results.csv")
-
-# 2. Compute efficiency metric: deliveries per agent per tick
-# assume column 'ticks' shows number of ticks until termination per run
-if 'ticks' not in df.columns:
-    df['ticks'] = df['Step']  # adapt if different
-
-# Avoid zero ticks
-df['Efficiency'] = df['TotalDeliveries'] / (df['num_agents'] * df['ticks'].replace(0, np.nan))
-
-# 3. Descriptive statistics
-print("\n=== Descriptive Statistics by Strategy ===")
-desc = df.groupby('strategy')['Efficiency'].agg(['mean','std','count'])
-print(desc)
-
-# 4. Full-factorial ANOVA
-formula = ('Efficiency ~ C(strategy) + C(num_agents) + C(shelf_rows) '
-    '+ C(shelf_edge_gap) + C(aisle_interval) + C(search_radius) '
-    '+ C(strategy):C(num_agents)'
+def load_and_clean(path):
+    """Load CSV and perform basic cleaning & type casting."""
+    df = pd.read_csv(path)
+    # standardize column names
+    df.columns = (
+        df.columns
+          .str.strip()
+          .str.lower()
+          .str.replace(r'\s+', '_', regex=True)
     )
-model = ols(formula, data=df).fit()
-anova = sm.stats.anova_lm(model, typ=2)
-print("\n=== ANOVA Results ===")
-print(anova)
+    # expected columns
+    required = {'strategy', 'num_agents', 'ticks', 'total_deliveries',
+                'total_task_steps', 'collisions', 'pendingtasks'}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+    # drop runs with zero ticks (avoid divide by zero)
+    df = df[df['ticks'] > 0].copy()
+    # cast categories
+    df['strategy'] = df['strategy'].astype('category')
+    df['num_agents'] = df['num_agents'].astype('category')
+    return df
 
-# 5. Compute partial eta-squared
-total_ss = sum(anova['sum_sq']) + model.ssr
-anova['eta_sq'] = anova['sum_sq'] / (anova['sum_sq'] + model.ssr)
-print("\n=== Partial Eta-Squared ===")
-print(anova['eta_sq'])
+def compute_metrics(df):
+    """Add derived metrics: efficiency, collision_rate, avg_steps."""
+    df = df.copy()
+    df['efficiency']     = df['total_deliveries'] / (df['num_agents'].astype(int) * df['ticks'])
+    df['collision_rate'] = df['collisions'] / df['ticks']
+    df['avg_steps']      = df['total_task_steps'] / df['total_deliveries']
+    return df
 
-# 6. Post-hoc: Tukey HSD for strategy
-tukey_strat = pairwise_tukeyhsd(df['Efficiency'], df['strategy'])
-print("\n=== Tukey HSD: Strategy ===")
-print(tukey_strat)
+def descriptive_stats(df, outdir):
+    """Compute and save mean±std tables by strategy and by num_agents."""
+    by_strat = df.groupby('strategy').agg({
+        'efficiency': ['mean','std'],
+        'collision_rate': ['mean','std'],
+        'avg_steps': ['mean','std']
+    })
+    by_agents = df.groupby(['strategy','num_agents']).agg({
+        'efficiency': ['mean','std'],
+        'collision_rate': ['mean','std'],
+        'avg_steps': ['mean','std']
+    })
+    by_strat.to_csv(os.path.join(outdir, 'desc_by_strategy.csv'))
+    by_agents.to_csv(os.path.join(outdir, 'desc_by_strategy_num_agents.csv'))
+    print("Descriptive tables saved.")
 
-# 7. Interaction plot: strategy × num_agents
-plt.figure()
-sns.pointplot(data=df, x='num_agents', y='Efficiency', hue='strategy', dodge=True)
-plt.title('Efficiency by Strategy and Number of Agents')
-plt.savefig('interaction_strategy_agents.png')
+def plot_distributions(df, outdir):
+    """Boxplots of efficiency, collision_rate, avg_steps by strategy."""
+    metrics = ['efficiency','collision_rate','avg_steps']
+    for m in metrics:
+        plt.figure()
+        sns.boxplot(x='strategy', y=m, data=df)
+        plt.title(f'Distribution of {m}')
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, f'box_{m}.png'))
+        plt.close()
+    print("Distribution plots saved.")
 
-# 8. Distribution plots
-plt.figure()
-sns.violinplot(data=df, x='strategy', y='Efficiency')
-plt.title('Efficiency Distribution by Strategy')
-plt.savefig('violin_strategy_efficiency.png')
+def plot_interactions(df, outdir):
+    """Line plots of efficiency vs num_agents for each strategy."""
+    plt.figure()
+    sns.pointplot(x='num_agents', y='efficiency', hue='strategy', data=df, dodge=True, ci='sd')
+    plt.title('Efficiency vs Number of Agents')
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, 'efficiency_vs_num_agents.png'))
+    plt.close()
+    print("Interaction plot saved.")
 
-# 9. Residual diagnostics
-sm.qqplot(model.resid, line='45')
-plt.title('QQ-Plot of ANOVA Residuals')
-plt.savefig('qqplot_resid.png')
+def run_anova(df, outdir):
+    """Two-way ANOVA on efficiency."""
+    formula = 'efficiency ~ C(strategy) * C(num_agents)'
+    model = smf.ols(formula, data=df).fit()
+    anova = sm.stats.anova_lm(model, typ=2)
+    with open(os.path.join(outdir, 'anova_efficiency.txt'), 'w') as f:
+        f.write(anova.to_string())
+    print("ANOVA results saved.")
 
-# 10. Homogeneity test
-groups = [g['Efficiency'].dropna() for _,g in df.groupby('strategy')]
-stat, p = stats.levene(*groups)
-print(f"Levene's test: stat={stat:.3f}, p={p:.3f}")
+def run_posthoc(df, outdir):
+    """Tukey HSD for pairwise strategy comparisons on efficiency."""
+    mc = MultiComparison(df['efficiency'], df['strategy'])
+    result = mc.tukeyhsd()
+    with open(os.path.join(outdir, 'tukey_efficiency.txt'), 'w') as f:
+        f.write(result.summary().as_text())
+    print("Tukey HSD results saved.")
 
-# 11. Save summary
-anova.to_csv('anova_summary.csv')
-with open('tukey_strat.txt','w') as f:
-    f.write(str(tukey_strat))
-
-def main():
-    pass
+def main(csv_path, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    df = load_and_clean(csv_path)
+    df = compute_metrics(df)
+    descriptive_stats(df, output_dir)
+    plot_distributions(df, output_dir)
+    plot_interactions(df, output_dir)
+    run_anova(df, output_dir)
+    run_posthoc(df, output_dir)
+    print("All analysis complete. Outputs in:", output_dir)
 
 if __name__ == '__main__':
-    main()
+    p = argparse.ArgumentParser(description="Analyze warehouse strategy results")
+    p.add_argument('csv', help="path to batch_results.csv")
+    p.add_argument('-o','--out', default='analysis_output', help="output directory")
+    args = p.parse_args()
+    main(args.csv, args.out)

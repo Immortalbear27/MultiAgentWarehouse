@@ -33,7 +33,7 @@ space = make_space_component(agent_portrayal)
 
 # Create a plot component for your metrics
 plot = make_plot_component(
-    ["TotalDeliveries", "Collisions", "PendingTasks", "AvgStepsPerDelivery"],
+    ["total_deliveries", "collisions", "pendingtasks", "AvgStepsPerDelivery"],
     backend="matplotlib"
 )
 
