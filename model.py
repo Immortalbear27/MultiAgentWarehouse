@@ -94,6 +94,7 @@ class WarehouseEnvModel(Model):
         respawn_enabled = True,
         max_steps = 500,
         search_radius = 3,
+        auction_radius = 10,
         seed = None
     ):
         super().__init__(seed=seed)
@@ -107,6 +108,7 @@ class WarehouseEnvModel(Model):
         self.item_respawn_delay = item_respawn_delay
         self.respawn_enabled = respawn_enabled
         self.search_radius = search_radius
+        self.auction_radius = auction_radius
         self.respawn_queue: deque[tuple[tuple[int, int], int]] = deque()
         self.max_steps = max_steps
         self.path_cache: dict[tuple[tuple[int,int],tuple[int,int]], list[tuple[int,int]]] = {}
@@ -689,57 +691,49 @@ class WarehouseEnvModel(Model):
 
     
     def decentralised_strategy(self):
-        """
-        For each idle agent:
-          - find its nearest pickup entry by true path‐length,
-          - assign that one task immediately,
-          - reserve t+1,
-          - leave pickup/drop transitions to _process_agent_state.
-        """
         now = self.schedule.time
+        idle = [a for a in self.schedule.agents
+                if isinstance(a, WarehouseAgent) and a.state in (None, 'idle')]
+        if not idle or not self.tasks:
+            return
 
-        # Reactive: unreachable pickups → put back
-        for a in self.schedule.agents:
-            if isinstance(a, WarehouseAgent) and a.state == "to_pickup":
-                if not a.path and a.pos != a.pickup_pos:
-                    self.tasks.append((a.current_pickup, a.next_drop))
-                    a.state = "idle"
+        # 1️⃣ build arrays
+        A = np.array([a.pos for a in idle], dtype=np.int64)     # (nA,2)
+        P = np.array([pu   for pu,_ in self.tasks], dtype=np.int64)  # (nT,2)
 
-        # Collect idle agents
-        idle = [
-            a for a in self.schedule.agents
-            if isinstance(a, WarehouseAgent) and getattr(a, "state", None) in (None, "idle")
-        ]
-        self.random.shuffle(idle)
+        # 2️⃣ compute distances
+        D = np.abs(A[:,None,0] - P[None,:,0]) + np.abs(A[:,None,1] - P[None,:,1])  # (nA,nT)
 
-        # One‐by‐one assign nearest
-        for agent in idle:
-            if not self.tasks:
-                break
-            best = None
-            best_len = inf
-            for pu, dr in self.tasks:
-                neighs = self.neighbours[pu]
-                free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
-                if not free_adj:
-                    continue
-                entry = min(free_adj, key=lambda pos: abs(agent.pos[0]-pos[0]) + abs(agent.pos[1]-pos[1]))
-                p = self.compute_path(agent.pos, entry)
-                if p and len(p) < best_len:
-                    best_len = len(p)
-                    best = (pu, dr, entry, p)
-            if not best:
+        # 3️⃣ build bid matrix
+        bids = np.where(D <= self.auction_radius, 1.0/(D+1), 0.0)
+
+        # 4️⃣ pick winners in descending bid order
+        # flatten with (agent_idx, task_idx) pairs
+        flat_idxs = np.dstack(np.unravel_index(np.argsort(-bids.ravel()), bids.shape))[0]
+        assigned_agents = set()
+        assigned_tasks  = set()
+        for ai, ti in flat_idxs:
+            if bids[ai,ti] == 0 or ai in assigned_agents or ti in assigned_tasks:
                 continue
-            pu, dr, entry, path = best
+            agent = idle[ai]
+            pu, dr = self.tasks[ti]
+            # choose best free_adj entry as before (or reuse precomputed neighbor arrays)
+            neighs = [pos for pos in self.neighbours[pu] 
+                    if self._is_passable(pos, pu)]
+            entry = min(neighs, key=lambda pos: abs(agent.pos[0]-pos[0]) + abs(agent.pos[1]-pos[1]))
             agent.current_pickup = pu
-            agent.pickup_pos = entry
-            agent.next_drop = dr
-            agent.path = path
-            agent.state = "to_pickup"
-            # reserve first step
-            if path:
-                self.reservations[(path[0][0], path[0][1], now+1)] = agent.unique_id
-            self.tasks.remove((pu, dr))
+            agent.pickup_pos     = entry
+            agent.next_drop      = dr
+            agent.path           = self.compute_path(agent.pos, entry)
+            agent.state          = 'to_pickup'
+            assigned_agents.add(ai)
+            assigned_tasks.add(ti)
+            if len(assigned_agents) == len(idle):
+                break
+
+        # 5️⃣ remove assigned tasks (descending index)
+        for idx in sorted(assigned_tasks, reverse=True):
+            self.tasks.pop(idx)
 
 
     def swarm_strategy(self):
