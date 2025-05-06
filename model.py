@@ -9,6 +9,71 @@ from collections import deque, defaultdict
 import heapq
 from math import inf
 from scipy.optimize import linear_sum_assignment
+from numba import njit
+import numpy as np
+
+
+# Testing the NJIT efficiency increase:    
+@njit
+def best_adj_for_pickup(ax, ay, px, py,
+                        neigh_arr, neigh_len,
+                        heatmap, pheromone,
+                        deliveries, alpha, beta, gamma):
+    """
+    For one agent (ax,ay) & one pickup (px,py), scan its free adjacents:
+      neigh_arr[j, k] = the k’th neighbor for pickup j,
+      neigh_len[j]    = # valid neighbors for pickup j.
+    Returns (best_cost, best_k).
+    """
+    best_cost = 1e18
+    best_k    = 0
+    # j index is carried in the outer loop
+    # here we assume the caller slices neigh_arr[j], neigh_len[j]
+    for k in range(neigh_len):
+        nx = neigh_arr[k, 0]
+        ny = neigh_arr[k, 1]
+        # simple Manhattan dist to entry
+        d = abs(ax - nx) + abs(ay - ny)
+        # no per‐path heat summation here—too expensive
+        cost = d + beta * deliveries - gamma * pheromone[nx, ny]
+        if cost < best_cost:
+            best_cost = cost
+            best_k    = k
+    return best_cost, best_k
+
+@njit
+def make_cost_matrix(agent_pos, task_pos,
+                     neigh_arr_3d, neigh_lens,
+                     heatmap, pheromone,
+                     deliveries, alpha, beta, gamma):
+    """
+    Build (n_agents × n_tasks) cost matrix & best‐entry indices.
+    neigh_arr_3d: shape (n_tasks, maxL, 2)
+    neigh_lens:    shape (n_tasks,)
+    heatmap, pheromone: shape (width, height)
+    deliveries:    shape (n_agents,)
+    """
+    n_agents = agent_pos.shape[0]
+    n_tasks  = task_pos.shape[0]
+    cost_mat = np.empty((n_agents, n_tasks), np.float64)
+    best_k   = np.empty((n_agents, n_tasks), np.int64)
+    for i in range(n_agents):
+        ax, ay = agent_pos[i, 0], agent_pos[i, 1]
+        deliv   = deliveries[i]
+        for j in range(n_tasks):
+            neigh_arr = neigh_arr_3d[j]
+            length    = neigh_lens[j]
+            c, k = best_adj_for_pickup(
+                ax, ay,
+                task_pos[j,0], task_pos[j,1],
+                neigh_arr, length,
+                heatmap, pheromone,
+                deliv, alpha, beta, gamma
+            )
+            cost_mat[i, j]  = c
+            best_k[i, j]    = k
+    return cost_mat, best_k
+
 
 class WarehouseEnvModel(Model):
     """
@@ -27,7 +92,7 @@ class WarehouseEnvModel(Model):
         strategy = "centralised",
         item_respawn_delay = 50,
         respawn_enabled = True,
-        max_steps = 1000,
+        max_steps = 500,
         search_radius = 3,
         seed = None
     ):
@@ -51,6 +116,12 @@ class WarehouseEnvModel(Model):
         self.grid     = MultiGrid(width, height, torus=False)
         self.schedule = RandomActivation(self)
         
+        # Pre-compute 4-way neighbours for each cell:
+        self.neighbours = {
+            (x, y): self.grid.get_neighborhood((x, y), moore = False, include_center = False)
+            for x in range(width) for y in range(height)
+        }
+        
         # keep a running count of how often each cell has ≥1 robot
         self.heatmap = {
             (x, y): 0
@@ -66,7 +137,7 @@ class WarehouseEnvModel(Model):
         }
         self.pheromone_deposit  = 1.0   # how much each robot leaves per step
         self.pheromone_evap_rate = 0.05 # fraction to evaporate each tick
-        self.gamma               = 0.5  # weight for pheromone attraction in cost
+        self.gamma = 0.5  # weight for pheromone attraction in cost
 
         
         # 1️⃣ Counters for metrics
@@ -145,9 +216,7 @@ class WarehouseEnvModel(Model):
         while queue:
             x, y = queue.popleft()
             d0   = self.static_dist[(x, y)]
-            for nx, ny in self.grid.get_neighborhood((x, y),
-                                                     moore=False,
-                                                     include_center=False):
+            for nx, ny in self.neighbours[(x, y)]:
                 # Skip shelves (static obstacles)
                 if any(isinstance(o, Shelf) for o in self.grid.get_cell_list_contents([(nx, ny)])):
                     continue
@@ -181,7 +250,7 @@ class WarehouseEnvModel(Model):
                 # print(f"[ERROR][{now}] compute_path_to_drop aborted after {loop_count} loops")
                 return []
 
-            nbrs = self.grid.get_neighborhood((x0, y0), moore=False, include_center=False)
+            nbrs = self.neighbours[(x0, y0)]
             candidates = [
                 (nx, ny) for nx, ny in nbrs
                 if self.static_dist.get((nx, ny), inf) < self.static_dist[(x0, y0)]
@@ -537,67 +606,84 @@ class WarehouseEnvModel(Model):
             self.datacollector.get_model_vars_dataframe().to_csv("results.csv", index=False)
             # Ensure that any external controller sees we're done:
             self.running = False
-
-        
+    
     def centralised_strategy(self):
-        """
-        Phase 1: for each idle agent, solve one-shot assignment
-        of (agent → best pickup entry) via Hungarian on our cost matrix.
-        No inline pickup/drop logic here; that lives in _process_agent_state.
-        """
         alpha, beta = 0.1, 0.5
 
-        # 1️⃣ Find all truly idle robots
-        idle = [
-            a for a in self.schedule.agents
-            if isinstance(a, WarehouseAgent) and getattr(a, "state", None) in (None, "idle")
-        ]
+        # 1️⃣ gather idle agents
+        idle = [a for a in self.schedule.agents
+                if isinstance(a, WarehouseAgent)
+                and getattr(a, "state", None) in (None, "idle")]
         if not idle or not self.tasks:
             return
 
-        # 2️⃣ Build cost matrix & remember best path for each entry
-        cost_matrix = []
-        path_choices = []
-        for agent in idle:
-            costs = []
-            picks = []
-            for pu, dr in self.tasks:
-                neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
-                free_adj = [
-                    pos for pos in neighs
-                    if all(not isinstance(o, Shelf) for o in self.grid.get_cell_list_contents([pos]))
-                ]
-                best = (inf, None, [])
-                for entry in free_adj:
-                    p = self.compute_path(agent.pos, entry)
-                    c = len(p) \
-                        + alpha * sum(self.heatmap[cx, cy] for cx, cy in p) \
-                        + beta * agent.deliveries \
-                        - self.gamma * sum(self.pheromones[cx, cy] for cx, cy in p)
-                    if c < best[0]:
-                        best = (c, entry, p)
-                costs.append(best[0])
-                picks.append((best[1], best[2]))
-            cost_matrix.append(costs)
-            path_choices.append(picks)
+        # 2️⃣ convert to numpy
+        import numpy as _np
+        n_agents = len(idle)
+        n_tasks  = len(self.tasks)
 
-        # 3️⃣ Solve assignment
-        rows, cols = linear_sum_assignment(cost_matrix)
+        agent_pos = _np.empty((n_agents, 2), np.int64)
+        deliveries = _np.empty(n_agents, np.float64)
+        for i,a in enumerate(idle):
+            agent_pos[i, 0], agent_pos[i, 1] = a.pos
+            deliveries[i] = a.deliveries
+
+        task_pos = _np.empty((n_tasks, 2), np.int64)
+        for j,(pu,_) in enumerate(self.tasks):
+            task_pos[j,0], task_pos[j,1] = pu
+
+        # 3️⃣ build fixed‐size neighbor array
+        free_adj_lists = []
+        maxL = 0
+        for pu,_ in self.tasks:
+            lst = [pos for pos in self.neighbours[pu] if self._is_passable(pos, pu)]
+            free_adj_lists.append(lst)
+            if len(lst) > maxL:
+                maxL = len(lst)
+
+        neigh_arr = _np.full((n_tasks, maxL, 2), -1, np.int64)
+        neigh_lens= _np.zeros(n_tasks, np.int64)
+        for j,lst in enumerate(free_adj_lists):
+            neigh_lens[j] = len(lst)
+            for k,(x,y) in enumerate(lst):
+                neigh_arr[j,k,0] = x
+                neigh_arr[j,k,1] = y
+
+        # 4️⃣ pack heatmap & pheromone
+        heatmap_vals   = _np.zeros((self.width, self.height), np.float64)
+        pheromone_vals = _np.zeros((self.width, self.height), np.float64)
+        for x in range(self.width):
+            for y in range(self.height):
+                heatmap_vals[x,y]   = self.heatmap[(x,y)]
+                pheromone_vals[x,y] = self.pheromones[(x,y)]
+
+        # 5️⃣ call JIT matrix builder
+        cost_mat, best_k = make_cost_matrix(
+            agent_pos, task_pos,
+            neigh_arr, neigh_lens,
+            heatmap_vals, pheromone_vals,
+            deliveries, alpha, beta, self.gamma
+        )
+
+        # 6️⃣ solve assignment
+        rows, cols = linear_sum_assignment(cost_mat)
         to_remove = []
-        for r, c in zip(rows, cols):
-            if cost_matrix[r][c] == inf:
+        for i,j in zip(rows, cols):
+            if cost_mat[i,j] >= _np.inf:
                 continue
-            agent = idle[r]
-            pickup, drop = self.tasks[c]
-            entry, path = path_choices[r][c]
-            agent.current_pickup = pickup
-            agent.pickup_pos = entry
-            agent.next_drop = drop
-            agent.path = path
-            agent.state = "to_pickup"
-            to_remove.append(c)
+            a    = idle[i]
+            pu,_ = self.tasks[j]
+            # get the neighbor index k
+            k    = best_k[i,j]
+            entry = (int(neigh_arr[j,k,0]), int(neigh_arr[j,k,1]))
+            a.current_pickup = pu
+            a.pickup_pos     = entry
+            a.next_drop      = self.tasks[j][1]
+            a.path           = self.compute_path(a.pos, entry)
+            a.state          = "to_pickup"
+            to_remove.append(j)
 
-        # 4️⃣ Remove assigned tasks (descending index to stay valid)
+        # 7️⃣ purge tasks
         for idx in sorted(to_remove, reverse=True):
             self.tasks.pop(idx)
 
@@ -612,28 +698,28 @@ class WarehouseEnvModel(Model):
         """
         now = self.schedule.time
 
-        # 1️⃣ Reactive: unreachable pickups → put back
+        # Reactive: unreachable pickups → put back
         for a in self.schedule.agents:
             if isinstance(a, WarehouseAgent) and a.state == "to_pickup":
                 if not a.path and a.pos != a.pickup_pos:
                     self.tasks.append((a.current_pickup, a.next_drop))
                     a.state = "idle"
 
-        # 2️⃣ Collect idle agents
+        # Collect idle agents
         idle = [
             a for a in self.schedule.agents
             if isinstance(a, WarehouseAgent) and getattr(a, "state", None) in (None, "idle")
         ]
         self.random.shuffle(idle)
 
-        # 3️⃣ One‐by‐one assign nearest
+        # One‐by‐one assign nearest
         for agent in idle:
             if not self.tasks:
                 break
             best = None
             best_len = inf
             for pu, dr in self.tasks:
-                neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
+                neighs = self.neighbours[pu]
                 free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
                 if not free_adj:
                     continue
@@ -665,7 +751,7 @@ class WarehouseEnvModel(Model):
         now = self.schedule.time
         pickup_radius = 3
 
-        # 0️⃣ Cluster‐grab
+        # Cluster‐grab
         idle_agents = [a for a in self.robots if a.state == "idle"]
         visited = set()
         for a in idle_agents:
@@ -703,7 +789,7 @@ class WarehouseEnvModel(Model):
             # now remove tasks in descending idx order
             for idx, pu, dr, member in sorted(assignments, key=lambda x: x[0], reverse=True):
                 self.tasks.pop(idx)
-                neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
+                neighs = self.neighbours[pu]
                 free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
                 if not free_adj:
                     continue
@@ -719,7 +805,7 @@ class WarehouseEnvModel(Model):
                 if member.path:
                     self.reservations[(member.path[0][0], member.path[0][1], now+1)] = member.unique_id
 
-        # 0️⃣b Exploration fallback if nobody grabbed yet
+        # Exploration fallback if nobody grabbed yet
         if self.tasks and not any(a.state=="to_pickup" for a in self.robots):
             idle_agents = [a for a in self.robots if a.state=="idle"]
             if not idle_agents:
@@ -734,7 +820,7 @@ class WarehouseEnvModel(Model):
             )
             # remove it once
             self.tasks.pop(idx)
-            neighs = self.grid.get_neighborhood(pu, moore=False, include_center=False)
+            neighs = self.neighbours[pu]
             free_adj = [pos for pos in neighs if self._is_passable(pos, pu)]
             if free_adj:
                 entry = min(
@@ -752,7 +838,7 @@ class WarehouseEnvModel(Model):
                                         member.path[0][1],
                                         now+1)] = member.unique_id
 
-        # 1️⃣ Deposit pickup pheromones
+        # Deposit pickup pheromones
         for pu, _ in self.tasks:
             self.pheromones[pu] += 0.5
 
@@ -864,7 +950,7 @@ class WarehouseEnvModel(Model):
             x_min, x_max, y_min, y_max = 0, self.width-1, 0, self.height-1
 
         out = []
-        for nx, ny in self.grid.get_neighborhood((x, y), moore=False, include_center=False):
+        for nx, ny in self.neighbours[(x, y)]:
             # 1) within box?
             if not (x_min <= nx <= x_max and y_min <= ny <= y_max):
                 continue
@@ -882,7 +968,7 @@ class WarehouseEnvModel(Model):
 
         # debug if completely blocked
         if not out:
-            nbrs = self.grid.get_neighborhood((x, y), moore=False, include_center=False)
+            nbrs = self.neighbours[(x, y)]
             blocked = [(pos, self.reservations.get((pos[0], pos[1], t+1))) for pos in nbrs]
             # print(f"[DEBUG][{self.schedule.time}] _allowed_neighbors({(x,y)}→{goal}) → [] "
             #    f" nbrs={nbrs} reservations={blocked}")
@@ -912,7 +998,7 @@ class WarehouseEnvModel(Model):
             if not items_here:
                 # nothing to pick up — drop this task and go idle
                 # (or you could re-queue it for later)
-                print(f"[WARN][{self.schedule.time}] Agent {agent.unique_id} at {agent.current_pickup} but no items to pick")
+                # print(f"[WARN][{self.schedule.time}] Agent {agent.unique_id} at {agent.current_pickup} but no items to pick")
                 agent.state = "idle"
                 return
             itm = items_here.pop()

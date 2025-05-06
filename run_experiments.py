@@ -6,6 +6,10 @@ import pandas as pd
 import random
 from tqdm import tqdm  # progress bar
 from model import WarehouseEnvModel
+from copy import deepcopy
+
+# Cache of base models to avoid repeated __init__
+_MODEL_CACHE = {}
 
 # --- Simulation runner for a single configuration ---
 def single_run(params: dict) -> dict:
@@ -13,16 +17,26 @@ def single_run(params: dict) -> dict:
     Run one simulation with given parameters headlessly.
     Returns a dict of model metrics combined with the input params.
     """
-        # Extract and remove max_steps and iteration from params (defaults)
     max_steps = params.get("max_steps", 500)
+    # Separate model args
     model_params = params.copy()
     model_params.pop("max_steps", None)
     model_params.pop("iteration", None)
-    model = WarehouseEnvModel(**model_params)
-    # Run for a fixed number of steps
-    for _ in range(max_steps):
+    # Instantiate or retrieve base model
+    key = tuple(sorted(model_params.items()))
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = WarehouseEnvModel(**model_params)
+    # Deepcopy base model for a fresh run
+    model = deepcopy(_MODEL_CACHE[key])
+    # Run simulation
+    for step in range(max_steps):
         model.step()
-    # collect metrics directly from model
+        if not model.tasks:
+            model.ticks = step + 1
+            break
+    else:
+        model.ticks = max_steps
+    # Collect metrics
     result = {
         'total_deliveries':   model.total_deliveries,
         'ticks':              model.ticks,
@@ -30,7 +44,7 @@ def single_run(params: dict) -> dict:
         'collisions':         model.collisions,
         'total_task_steps':   model.total_task_steps
     }
-    # merge in input parameters (excluding internal max_steps)
+    # Merge in input parameters
     result.update(model_params)
     return result
 
@@ -55,7 +69,7 @@ def write_batch(df_chunk: pd.DataFrame, path: str = "results.parquet"):
     df_chunk.to_parquet(path, index=False)
 
 # Runner for a single permutation: executes multiple iterations
-iterations = 15
+iterations = 1
 
 def run_permutation(perm):
     """Execute multiple iterations for one parameter permutation."""
@@ -104,7 +118,7 @@ if __name__ == "__main__":
     perms = strat_samples
     print(f"Sampling {len(perms)}/{original_count} unique permutations (≈{samples_per_strat} per strategy)")
 
-    # Build full list of parameter sets including iterations
+        # Build full list of parameter sets including iterations
     all_params = []
     for perm in perms:
         for it in range(iterations):
@@ -112,14 +126,18 @@ if __name__ == "__main__":
             p['iteration'] = it
             all_params.append(p)
 
-        # Parallelize over permutations directly, tracking each with tqdm
-    n_workers = min(len(perms), multiprocessing.cpu_count())
-    nested = []
+    # Chunk all_params across workers to amortize startup cost
+    n_workers = min(len(all_params), multiprocessing.cpu_count())
+    batches = chunk_list(all_params, n_workers)
+    print(f"Running {len(all_params)} total runs across {len(batches)} batch(es) on {n_workers} worker(s)")
+
+    # Execute batches in parallel, tracking progress per batch
+    results = []
     with multiprocessing.Pool(processes=n_workers) as pool:
-        for sub in tqdm(pool.imap(run_permutation, perms), total=len(perms), desc="Permutations"):
-            nested.append(sub)
-    # Flatten results
-    results = [r for sub in nested for r in sub]
+        for batch_results in tqdm(pool.imap(run_batch, batches), total=len(batches), desc="Batches"):
+            results.extend(batch_results)
+
+    # Flattened results already collected in `results`
 
     # Create DataFrame and save
     df = pd.DataFrame(results)
