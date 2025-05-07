@@ -1,4 +1,3 @@
-# run_experiments.py (updated to ensure metrics + parameters in output CSV)
 import os
 import itertools
 import multiprocessing
@@ -8,7 +7,7 @@ from tqdm import tqdm  # progress bar
 from model import WarehouseEnvModel
 from copy import deepcopy
 
-# Cache of base models to avoid repeated __init__
+# Cache of “static” model skeletons to speed up repeated __init__
 _MODEL_CACHE = {}
 
 # --- Simulation runner for a single configuration ---
@@ -19,17 +18,34 @@ def single_run(params: dict) -> dict:
     """
     max_steps = params.get("max_steps", 500)
     iteration = params.get("iteration", 0)
-    # Separate model args
+
+    # Extract model construction params (exclude control fields)
     model_params = params.copy()
     model_params.pop("max_steps", None)
     model_params.pop("iteration", None)
-    # Instantiate or retrieve base model
-    key = tuple(sorted(model_params.items()))
+
+    # Build static skeleton key and cache if needed
+    static_params = model_params.copy()
+    key = tuple(sorted(static_params.items()))
     if key not in _MODEL_CACHE:
-        _MODEL_CACHE[key] = WarehouseEnvModel(**model_params)
-    # Deepcopy base model for a fresh run
+        # Instantiate base model once per unique config
+        _MODEL_CACHE[key] = WarehouseEnvModel(**static_params)
     model = deepcopy(_MODEL_CACHE[key])
-    
+
+    # OVERWRITE RNG with a fresh instance for each iteration
+    new_rng = random.Random(iteration)
+    # Assign to Mesa's RNG attribute
+    model.random = new_rng
+    # If an internal RNG used elsewhere
+    if hasattr(model, '_rng'):
+        model._rng = new_rng
+
+    # Regenerate any RNG-dependent initial state (e.g. tasks ordering)
+    try:
+        model.tasks = model.create_tasks()
+    except AttributeError:
+        pass
+
     # Run simulation
     for step in range(max_steps):
         model.step()
@@ -38,6 +54,7 @@ def single_run(params: dict) -> dict:
             break
     else:
         model.ticks = max_steps
+
     # Collect metrics
     result = {
         'total_deliveries':   model.total_deliveries,
@@ -46,8 +63,9 @@ def single_run(params: dict) -> dict:
         'collisions':         model.collisions,
         'total_task_steps':   model.total_task_steps
     }
-    # Merge in input parameters
+    # Merge in input parameters for traceability
     result.update(model_params)
+    result['iteration'] = iteration
     return result
 
 # --- Batch runner to group multiple runs in one worker ---
@@ -55,10 +73,9 @@ def run_batch(params_batch: list[dict]) -> list[dict]:
     results = []
     for params in params_batch:
         try:
-            result = single_run(params)
+            results.append(single_run(params))
         except Exception as e:
-            result = {**params, 'error': str(e)}
-        results.append(result)
+            results.append({**params, 'error': str(e)})
     return results
 
 # --- Utility to split list into N roughly equal chunks ---
@@ -66,29 +83,9 @@ def chunk_list(lst: list, n_chunks: int) -> list[list]:
     chunk_size = (len(lst) + n_chunks - 1) // n_chunks
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
-# --- Utility to write DataFrame chunks to Parquet ---
-def write_batch(df_chunk: pd.DataFrame, path: str = "results.parquet"):
-    df_chunk.to_parquet(path, index=False)
-
-# Runner for a single permutation: executes multiple iterations
-iterations = 30
-
-def run_permutation(perm):
-    """Execute multiple iterations for one parameter permutation."""
-    results = []
-    for it in range(iterations):
-        params = {**perm, 'iteration': it}
-        try:
-            res = single_run(params)
-        except Exception as e:
-            res = {**params, 'error': str(e)}
-        results.append(res)
-    return results
-
-
 # --- Main entry point ---
 if __name__ == "__main__":
-    # Define experimental parameter grid
+    # Define parameter grid
     variable_params = {
         'strategy':       ['centralised', 'decentralised', 'swarm'],
         'num_agents':     [5, 10, 15, 20],
@@ -98,20 +95,18 @@ if __name__ == "__main__":
         'width':          [20, 30, 40],
         'height':         [20, 30, 40],
     }
-    # Build list of unique permutations (no iteration)
+    # Generate unique permutations
     perms = [dict(zip(variable_params.keys(), vals))
              for vals in itertools.product(*variable_params.values())]
-    # Stratified sampling
+
+    # Stratified sampling cap
     max_samples = 200
     strategies = variable_params['strategy']
     samples_per_strat = max_samples // len(strategies)
     strat_samples = []
     for strat in strategies:
-        strat_group = [p for p in perms if p['strategy'] == strat]
-        if len(strat_group) <= samples_per_strat:
-            strat_samples.extend(strat_group)
-        else:
-            strat_samples.extend(random.sample(strat_group, samples_per_strat))
+        group = [p for p in perms if p['strategy'] == strat]
+        strat_samples.extend(group if len(group) <= samples_per_strat else random.sample(group, samples_per_strat))
     leftover = max_samples - len(strat_samples)
     if leftover > 0:
         remaining = [p for p in perms if p not in strat_samples]
@@ -120,7 +115,8 @@ if __name__ == "__main__":
     perms = strat_samples
     print(f"Sampling {len(perms)}/{original_count} unique permutations (≈{samples_per_strat} per strategy)")
 
-        # Build full list of parameter sets including iterations
+    # Expand with iterations
+    iterations = 30
     all_params = []
     for perm in perms:
         for it in range(iterations):
@@ -128,22 +124,20 @@ if __name__ == "__main__":
             p['iteration'] = it
             all_params.append(p)
 
-    # Chunk all_params across workers to amortize startup cost
+    # Parallel execution setup
     n_workers = min(len(all_params), multiprocessing.cpu_count())
     batches = chunk_list(all_params, n_workers)
-    print(f"Running {len(all_params)} total runs across {len(batches)} batch(es) on {n_workers} worker(s)")
+    print(f"Running {len(all_params)} runs across {len(batches)} batches on {n_workers} workers")
 
-    # Execute batches in parallel, tracking progress per batch
+    # Execute and collect
     results = []
     with multiprocessing.Pool(processes=n_workers) as pool:
-        for batch_results in tqdm(pool.imap(run_batch, batches), total=len(batches), desc="Batches"):
-            results.extend(batch_results)
+        for batch in tqdm(pool.imap(run_batch, batches), total=len(batches), desc="Batches"):
+            results.extend(batch)
 
-    # Flattened results already collected in `results`
-
-    # Create DataFrame and save
+    # Save to CSV
     df = pd.DataFrame(results)
-    if 'error' in df.columns:
+    if 'error' in df:
         df = df.drop(columns=['error'])
     df.to_csv('batch_results.csv', index=False)
     print(f"Batch completed: {len(df)} rows written to batch_results.csv.")
