@@ -12,8 +12,7 @@ from scipy.optimize import linear_sum_assignment
 from numba import njit
 import numpy as np
 
-
-# Testing the NJIT efficiency increase:    
+   
 @njit
 def best_adj_for_pickup(ax, ay, px, py,
                         neigh_arr, neigh_len,
@@ -140,6 +139,9 @@ class WarehouseEnvModel(Model):
         self.pheromone_deposit  = 1.0   # how much each robot leaves per step
         self.pheromone_evap_rate = 0.05 # fraction to evaporate each tick
         self.gamma = 0.5  # weight for pheromone attraction in cost
+        
+        # Testing pheromone efficiency increase:
+        self.pheromone_field = np.zeros((self.width, self.height), dtype = np.float64)
 
         
         # 1️⃣ Counters for metrics
@@ -148,6 +150,8 @@ class WarehouseEnvModel(Model):
         self.congestion_accum = 0        # Cumulative congestion counter
         self.ticks = 0                   # Used for averaging
         self.total_task_steps = 0        # Counter for total steps taken for tasks
+        
+        
         
 
         # DataCollector reporters:
@@ -509,59 +513,58 @@ class WarehouseEnvModel(Model):
 
         # Keep only future slots
         self.reservations = {k: v for k, v in self.reservations.items() if k[2] > now}
-
+    
     def _handle_priority_yielding(self):
+        """
+        Fast collision-avoidance via array sorting of next-cell intents.
+        """
         now = self.schedule.time
+        import numpy as _np
 
-        # 1) Collision avoidance as before (forced-left + sidestep)…
-        intents: dict[tuple[int,int], list[WarehouseAgent]] = {}
-        for a in self.schedule.agents:
+        # 1) Build array of size n_agents with desired cell idx or -1
+        agents = list(self.schedule.agents)
+        n = len(agents)
+        idxs = _np.full(n, -1, dtype=_np.int64)
+        for i, a in enumerate(agents):
             if isinstance(a, WarehouseAgent) and a.path:
-                intents.setdefault(a.path[0], []).append(a)
-        
-        # ➊ Break swap cycles: if A wants B.pos and B wants A.pos, make one wait
-        #    rather than inserting a.pos, we simply _drop_ the intended move
-        occupied = {a.pos: a for a in self.schedule.agents if isinstance(a, WarehouseAgent)}
-        for dest, colliders in list(intents.items()):
-            for a in colliders:
-                b = occupied.get(dest)
-                if b and b.path and b.path[0] == a.pos:
-                    # a and b are swapping; lower‐id yields by removing its next step
-                    if a.unique_id < b.unique_id:
-                        if a.path:
-                            a.path.pop(0)
+                x, y = a.path[0]
+                idxs[i] = x * self.height + y
+
+        # 2) Sort to group duplicates
+        order = _np.argsort(idxs)
+        sorted_idxs = idxs[order]
+
+        # 3) Detect runs of the same idx >1 => collisions
+        i = 0
+        while i < n:
+            j = i + 1
+            while j < n and sorted_idxs[j] == sorted_idxs[i] and sorted_idxs[i] != -1:
+                j += 1
+            if j - i > 1:
+                # collision among agents[order[i:j]]
+                for k in order[i:j]:
+                    a = agents[k]
+                    x0, y0 = a.pos
+                    # try left
+                    alt = (x0-1, y0)
+                    if 0 <= alt[0] < self.width and self.grid.is_cell_empty(alt):
+                        a.path.insert(0, alt)
                     else:
-                        if b.path:
-                            b.path.pop(0)       
-        
-        for dest, colliders in intents.items():
-            if len(colliders) > 1:
-                # forced‐left first
-                for a in colliders:
-                    left = (a.pos[0] - 1, a.pos[1])
-                    if 0 <= left[0] < self.width and self.grid.is_cell_empty(left):
-                        a.path.insert(0, left)
-                # random sidestep if still colliding
-                for a in colliders:
-                    if a.path and a.path[0] == dest:
+                        # fallback an adjacent sidestep
                         for dx, dy in [(0,1),(1,0),(0,-1),(-1,0)]:
-                            alt = (a.pos[0]+dx, a.pos[1]+dy)
-                            if (0 <= alt[0] < self.width
-                                and 0 <= alt[1] < self.height
-                                and self.grid.is_cell_empty(alt)):
-                                a.path.insert(0, alt)
+                            nb = (x0+dx, y0+dy)
+                            if (0 <= nb[0] < self.width and 0 <= nb[1] < self.height
+                                    and self.grid.is_cell_empty(nb)):
+                                a.path.insert(0, nb)
                                 break
+            i = j
 
-        # 2) Build *new* reservations: only the very next cell at t+1
+        # 4) Rebuild reservations for t+1
         new_res = {}
-        for a in self.schedule.agents:
-            if not isinstance(a, WarehouseAgent) or not a.path:
-                continue
-            nxt = a.path[0]
-            key = (nxt[0], nxt[1], now + 1)
-            new_res[key] = a.unique_id
-
-        # 3) Swap in our lean reservation table
+        for a in agents:
+            if isinstance(a, WarehouseAgent) and a.path:
+                nx, ny = a.path[0]
+                new_res[(nx, ny, now+1)] = a.unique_id
         self.reservations = new_res
             
     def update_congestion_metrics(self):
@@ -576,11 +579,13 @@ class WarehouseEnvModel(Model):
         # **new**: increment heatmap counts for every cell that had ≥1 robot
         for cell in congested_cells:
             self.heatmap[cell] += 1
-
+            
     def evaporate_pheromones(self):
-        rho = self.pheromone_evap_rate
-        for cell, lvl in self.pheromones.items():
-            self.pheromones[cell] = lvl * (1 - rho)
+        """
+        Evaporate the pheromone field in one NumPy operation.
+        """
+        # C-level evaporation across entire grid
+        self.pheromone_field *= (1.0 - self.pheromone_evap_rate)        
 
     def apply_strategy(self):
         """
