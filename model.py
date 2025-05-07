@@ -217,37 +217,39 @@ class WarehouseEnvModel(Model):
 
     def compute_drop_zone_distances(self):
         """
-        Multi-source BFS from all drop-zone cells to compute
-        `self.static_dist[(x,y)] = d`, the (unweighted) grid‐distance
-        from (x,y) to the nearest drop-zone, ignoring robots/reservations.
+        Computes shortest grid‐distances from every cell to the nearest drop-zone.
+
+        Uses a multi-source BFS seeded at all drop-zone coordinates,
+        propagating outwards over the 4-connected grid. Treats shelves as impassable
+        obstacles but ignores robots and reservation markers.
         """
-        self.static_dist: dict[tuple[int,int], int] = {
+        self.static_distance = {
             (x, y): inf
             for x in range(self.width)
             for y in range(self.height)
         }
         queue = deque()
 
-        # Seed the queue with drop-zone cells at distance 0
-        for dz in self.drop_coords:
-            self.static_dist[dz] = 0
-            queue.append(dz)
+        # Seed the queue with drop-zone cells:
+        for dropzone in self.drop_coords:
+            self.static_distance[dropzone] = 0
+            queue.append(dropzone)
 
-        # 4-way grid BFS
+        # 4-way grid BFS:
         while queue:
             x, y = queue.popleft()
-            d0   = self.static_dist[(x, y)]
+            d0   = self.static_distance[(x, y)]
             for nx, ny in self.neighbours[(x, y)]:
-                # Skip shelves (static obstacles)
+                # Skip shelves (static obstacles):
                 if any(isinstance(o, Shelf) for o in self.grid.get_cell_list_contents([(nx, ny)])):
                     continue
-                if self.static_dist[(nx, ny)] > d0 + 1:
-                    self.static_dist[(nx, ny)] = d0 + 1
+                if self.static_distance[(nx, ny)] > d0 + 1:
+                    self.static_distance[(nx, ny)] = d0 + 1
                     queue.append((nx, ny))
                     
     def compute_path_to_drop(self, start: tuple[int,int], goal: tuple[int,int]) -> list[tuple[int,int]]:
         """
-        Greedy, reservation-aware walk from start → goal along the static_dist gradient.
+        Greedy, reservation-aware walk from start → goal along the static_distance gradient.
         Falls back to full A* only if blocked.  Caps the loop to avoid infinite cycling.
         """
         now = self.schedule.time
@@ -269,14 +271,14 @@ class WarehouseEnvModel(Model):
             nbrs = self.neighbours[(x0, y0)]
             candidates = [
                 (nx, ny) for nx, ny in nbrs
-                if self.static_dist.get((nx, ny), inf) < self.static_dist[(x0, y0)]
+                if self.static_distance.get((nx, ny), inf) < self.static_distance[(x0, y0)]
                 and not isinstance(self.reservations.get((nx, ny, t+1)), int)
                 and self._is_passable((nx, ny), goal)
             ]
             if not candidates:
                 return self.compute_path(start, goal)
 
-            x1, y1 = min(candidates, key=lambda c: self.static_dist[c])
+            x1, y1 = min(candidates, key=lambda c: self.static_distance[c])
             path.append((x1, y1))
             # Use None placeholder reservation (now treated as non-blocking in A*)
             self.reservations[(x1, y1, t+1)] = None
