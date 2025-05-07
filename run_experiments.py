@@ -18,6 +18,7 @@ def single_run(params: dict) -> dict:
     Returns a dict of model metrics combined with the input params.
     """
     max_steps = params.get("max_steps", 500)
+    iteration = params.get("iteration", 0)
     # Separate model args
     model_params = params.copy()
     model_params.pop("max_steps", None)
@@ -28,6 +29,7 @@ def single_run(params: dict) -> dict:
         _MODEL_CACHE[key] = WarehouseEnvModel(**model_params)
     # Deepcopy base model for a fresh run
     model = deepcopy(_MODEL_CACHE[key])
+    
     # Run simulation
     for step in range(max_steps):
         model.step()
@@ -69,7 +71,7 @@ def write_batch(df_chunk: pd.DataFrame, path: str = "results.parquet"):
     df_chunk.to_parquet(path, index=False)
 
 # Runner for a single permutation: executes multiple iterations
-iterations = 1
+iterations = 30
 
 def run_permutation(perm):
     """Execute multiple iterations for one parameter permutation."""
