@@ -247,10 +247,22 @@ class WarehouseEnvModel(Model):
                     self.static_distance[(nx, ny)] = d0 + 1
                     queue.append((nx, ny))
                     
-    def compute_path_to_drop(self, start: tuple[int,int], goal: tuple[int,int]) -> list[tuple[int,int]]:
+    def compute_path_to_drop(self, start, goal):
         """
-        Greedy, reservation-aware walk from start → goal along the static_distance gradient.
-        Falls back to full A* only if blocked.  Caps the loop to avoid infinite cycling.
+        Compute a reservation-aware path from start to a drop-zone.
+
+        Uses a greedy descent at each step, moving to an adjacent cell with 
+        strictly lower static_distance that is passable and not reserved at 
+        the next timestep to build a path. If no valid move exists, or if the 
+        search loops beyond the limit, it falls back to full A* via compute_path().
+
+        Args:
+            start: Starting (x, y) coordinate.
+            goal: Target (x, y) coordinate.
+
+        Returns: Sequence of grid coordinates from start to goal 
+        (exclusive of start). Returns an empty list if no path is 
+        found, or the result of compute_path().
         """
         now = self.schedule.time
 
