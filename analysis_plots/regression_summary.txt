@@ -1,0 +1,15 @@
+
+=======================================
+                             Regression
+---------------------------------------
+Intercept                    0.079***  
+                             (0.001)   
+C(strategy)[T.decentralised] -0.012*** 
+                             (0.001)   
+C(strategy)[T.swarm]         -0.035*** 
+                             (0.001)   
+R-squared                    0.161     
+R-squared Adj.               0.160     
+=======================================
+Standard errors in parentheses.
+* p<.1, ** p<.05, ***p<.01

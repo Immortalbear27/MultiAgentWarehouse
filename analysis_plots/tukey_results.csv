@@ -1,0 +1,4 @@
+group1,group2,meandiff,p-adj,lower,upper,reject
+centralised,decentralised,,,,,False
+centralised,swarm,-0.0348,,,,False
+decentralised,swarm,,,,,False

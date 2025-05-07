@@ -4,12 +4,13 @@ Enhanced analysis program for multi-agent warehouse simulation results.
 
 This script loads batch_results.csv, computes derived metrics,
 aggregates results by strategy and task complexity,
-produces descriptive and inferential analyses:
+produces descriptive and inferential analyses, and
+exports summary tables and plots for report inclusion:
  - distribution plots (boxplots)
  - means ± 95% confidence intervals
  - ANOVA + Tukey HSD post-hoc
- - effect sizes (eta-squared, Cohen's d)
- - regression with interaction
+ - effect sizes (eta-squared, Cohen's d) with bar chart
+ - regression with interaction and tabular export
  - slopes vs complexity
  - correlation analysis
  - composite efficiency index
@@ -32,6 +33,7 @@ from scipy.stats import f_oneway, sem, t, pearsonr
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import statsmodels.formula.api as smf
 from statsmodels.stats.anova import anova_lm
+from statsmodels.iolib.summary2 import summary_col
 
 
 def load_and_clean(file_path):
@@ -62,18 +64,17 @@ def augment(df):
 
 def aggregate(df):
     return (
-        df.groupby(["strategy","initial_tasks"]) 
+        df.groupby(["strategy","initial_tasks"]) \
           .agg(mean_throughput=("throughput","mean"),
                std_throughput=("throughput","std"),
                mean_steps=("avg_steps","mean"),
                mean_collisions=("collisions_per_delivery","mean"),
-               mean_composite=("composite_efficiency","mean"))
+               mean_composite=("composite_efficiency","mean"))\
           .reset_index()
     )
 
 
 def plot_distributions(df, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
     plt.figure(figsize=(12, 6))
     sns.boxplot(data=df, x="initial_tasks", y="throughput", hue="strategy")
     plt.title("Throughput distributions by strategy & complexity")
@@ -91,15 +92,16 @@ def compute_confidence_intervals(df, metric="throughput", alpha=0.05):
     return ci_df
 
 
-def plot_error_bars(metric, ylabel, filename, agg, ci_df, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    merged = agg.merge(ci_df, on=["strategy","initial_tasks"])
+def plot_error_bars(metric, metric_col, ylabel, filename, agg, ci_df, output_dir):
     plt.figure(figsize=(8, 5))
+    merged = agg.merge(ci_df, on=["strategy","initial_tasks"])
     for strat, g in merged.groupby("strategy"):
-        plt.errorbar(g.initial_tasks, g[f"mean_{metric}"],
-                     yerr=[g[f"mean_{metric}"]-g[f"{metric}_ci_lower"],
-                           g[f"{metric}_ci_upper"]-g[f"mean_{metric}"]],
-                     marker='o', label=strat)
+        plt.errorbar(
+            g.initial_tasks,
+            g[metric_col],
+            yerr=[g[metric_col] - g[f"{metric}_ci_lower"], g[f"{metric}_ci_upper"] - g[metric_col]],
+            marker='o', label=strat
+        )
     plt.xlabel("Initial tasks")
     plt.ylabel(ylabel)
     plt.title(f"{ylabel} vs Task Complexity")
@@ -112,32 +114,47 @@ def run_anova(df):
     model = smf.ols('throughput ~ C(strategy)', data=df).fit()
     anova_res = anova_lm(model)
     eta2 = anova_res.loc['C(strategy)','sum_sq'] / anova_res['sum_sq'].sum()
-    return anova_res, eta2
+    return model, anova_res, eta2
 
 
 def run_posthoc_tukey(df, alpha=0.05):
     return pairwise_tukeyhsd(endog=df.throughput, groups=df.strategy, alpha=alpha)
 
 
-def compute_cohens_d(df, group1, group2):
-    x1 = df[df.strategy==group1].throughput
-    x2 = df[df.strategy==group2].throughput
-    n1, n2 = len(x1), len(x2)
-    s1, s2 = x1.std(), x2.std()
-    pooled_sd = np.sqrt(((n1-1)*s1**2 + (n2-1)*s2**2) / (n1+n2-2))
-    return (x1.mean() - x2.mean()) / pooled_sd
+def compute_cohens_d(df):
+    strategies = df.strategy.unique()
+    records = []
+    for i in range(len(strategies)):
+        for j in range(i+1, len(strategies)):
+            x1 = df[df.strategy==strategies[i]].throughput
+            x2 = df[df.strategy==strategies[j]].throughput
+            pooled_sd = np.sqrt(((len(x1)-1)*x1.std()**2 + (len(x2)-1)*x2.std()**2)/(len(x1)+len(x2)-2))
+            d = (x1.mean() - x2.mean())/pooled_sd
+            records.append({"pair":f"{strategies[i]} vs {strategies[j]}", "cohens_d":d})
+    return pd.DataFrame.from_records(records)
+
+
+def plot_effect_sizes(df_d, output_dir):
+    plt.figure(figsize=(6,4))
+    sns.barplot(data=df_d, x="pair", y="cohens_d")
+    plt.title("Cohen's d by Strategy Pair")
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "cohens_d_bar.png"))
 
 
 def fit_regression(df):
     return smf.ols('throughput ~ initial_tasks * C(strategy)', data=df).fit()
 
 
+def save_regression_summary(model, output_dir):
+    df_summary = summary_col([model], stars=True, float_format='%0.3f', model_names=['Regression'])
+    with open(os.path.join(output_dir, "regression_summary.txt"), 'w') as f:
+        f.write(df_summary.as_text())
+
+
 def compute_slopes(agg):
-    slopes = {}
-    for strat, g in agg.groupby("strategy"):
-        m, _ = np.polyfit(g.initial_tasks, g.mean_throughput, 1)
-        slopes[strat] = m
-    return slopes
+    return {strat:np.polyfit(g.initial_tasks, g.mean_throughput,1)[0] for strat,g in agg.groupby("strategy")}
 
 
 def compute_correlations(df):
@@ -149,7 +166,6 @@ def compute_correlations(df):
 
 
 def plot_collisions_by_area(df, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
     plt.figure(figsize=(10, 6))
     sns.scatterplot(data=df, x="warehouse_area", y="collisions", hue="strategy")
     plt.xlabel("Warehouse area (units^2)")
@@ -174,58 +190,75 @@ def main():
     p.add_argument("input_csv")
     p.add_argument("--output_dir", default="analysis_plots")
     args = p.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
 
     df = load_and_clean(args.input_csv)
     df = augment(df)
     df = compute_composite(df)
 
-    # descriptive
+    # Descriptive plots
     plot_distributions(df, args.output_dir)
-    # Throughput CI and plot
-    ci_tp = compute_confidence_intervals(df, "throughput")
     agg = aggregate(df)
-    plot_error_bars("throughput", "Mean throughput (deliveries/tick)",
-                    "throughput_CI.png", agg, ci_tp, args.output_dir)
-    # Path efficiency CI and plot
-    ci_steps = compute_confidence_intervals(df, "avg_steps")
-    agg_steps = agg.rename(columns={"mean_steps": "mean_avg_steps"})
-    plot_error_bars("avg_steps", "Mean steps per delivery",
-                    "steps_CI.png", agg_steps, ci_steps, args.output_dir)
-    # Collision rate CI and plot
-    ci_coll = compute_confidence_intervals(df, "collisions_per_delivery")
-    agg_coll = agg.rename(columns={"mean_collisions": "mean_collisions_per_delivery"})
-    plot_error_bars("collisions_per_delivery", "Mean collisions per delivery",
-                    "collisions_CI.png", agg_coll, ci_coll, args.output_dir)
-    # Warehouse size scatter
+
+    mapping = {
+        "throughput": ("mean_throughput", "Mean throughput (deliveries/tick)", "throughput_CI.png"),
+        "avg_steps": ("mean_steps", "Mean steps per delivery", "steps_CI.png"),
+        "collisions_per_delivery": ("mean_collisions", "Mean collisions per delivery", "collisions_CI.png")
+    }
+    for metric, (col_name, ylabel, fname) in mapping.items():
+        ci = compute_confidence_intervals(df, metric)
+        plot_error_bars(metric, col_name, ylabel, fname, agg, ci, args.output_dir)
+
     plot_collisions_by_area(df, args.output_dir)
 
-    # inferential
-    anova_res, eta2 = run_anova(df)
-    print("ANOVA results:\n", anova_res)
-    print(f"Eta-squared: {eta2:.3f}")
+    # Inferential statistics
+    model, anova_res, eta2 = run_anova(df)
     tukey = run_posthoc_tukey(df)
-    print(tukey)
 
-    # effect sizes
-    strategies = df.strategy.unique()
-    for i in range(len(strategies)):
-        for j in range(i+1, len(strategies)):
-            d = compute_cohens_d(df, strategies[i], strategies[j])
-            print(f"Cohen's d ({strategies[i]} vs {strategies[j]}): {d:.2f}")
+    # Effect sizes
+    df_d = compute_cohens_d(df)
+    df_d.to_csv(os.path.join(args.output_dir, "cohens_d.csv"), index=False)
+    plot_effect_sizes(df_d, args.output_dir)
 
-    # regression
-    reg = fit_regression(df)
-    print(reg.summary())
+        # Regression summary
+    save_regression_summary(model, args.output_dir)
+    # Export regression table as markdown
+    df_reg = pd.read_csv(os.path.join(args.output_dir, "regression_summary.txt"), sep="	", engine="python", comment="#") if False else None
+    # Alternatively write model summary to markdown directly
+    with open(os.path.join(args.output_dir, "regression_summary.md"), 'w') as f:
+        f.write(model.summary().as_text())
 
-    # slopes
+    # Slopes and correlations
     slopes = compute_slopes(agg)
-    print("Slopes of throughput vs complexity:", slopes)
-
-    # correlations
+    pd.DataFrame.from_dict(slopes, orient='index', columns=['slope']).to_csv(
+        os.path.join(args.output_dir, "throughput_slopes.csv"))
     corrs = compute_correlations(df)
-    print("Correlations:", corrs)
+    pd.DataFrame.from_dict(corrs, orient='index', columns=['correlation','p_value']).to_csv(
+        os.path.join(args.output_dir, "correlations.csv"))
 
-    # save aggregated results
+        # ANOVA and Tukey as text (and markdown)
+    anova_df = anova_res.reset_index().rename(columns={'index':'source'})
+    # Save as CSV and Markdown
+    anova_df.to_csv(os.path.join(args.output_dir, "anova_results.csv"), index=False)
+    with open(os.path.join(args.output_dir, "anova_results.md"), 'w') as f:
+        f.write(anova_df.to_markdown(index=False))
+    with open(os.path.join(args.output_dir, "anova_results.txt"), 'w') as f:
+        f.write(anova_res.to_string())
+        f.write(f"Eta-squared: {eta2:.3f}")
+    # Tukey post-hoc
+    tukey_df = pd.DataFrame(data=tukey._results_table.data[1:], columns=tukey._results_table.data[0])
+    tukey_df.to_csv(os.path.join(args.output_dir, "tukey_results.csv"), index=False)
+    with open(os.path.join(args.output_dir, "tukey_results.md"), 'w') as f:
+        f.write(tukey_df.to_markdown(index=False))
+    with open(os.path.join(args.output_dir, "tukey_results.txt"), 'w') as f:
+        f.write(tukey.summary().as_text())
+    with open(os.path.join(args.output_dir, "anova_results.txt"), 'w') as f:
+        f.write(anova_res.to_string())
+        f.write(f"\nEta-squared: {eta2:.3f}\n")
+    with open(os.path.join(args.output_dir, "tukey_results.txt"), 'w') as f:
+        f.write(tukey.summary().as_text())
+
+    # Save aggregated metrics
     agg.to_csv(os.path.join(args.output_dir, "aggregated_metrics.csv"), index=False)
 
 if __name__ == '__main__':
