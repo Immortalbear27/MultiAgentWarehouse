@@ -142,37 +142,35 @@ class WarehouseEnvModel(Model):
             for x in range(width) for y in range(height)
         }
         
-        # keep a running count of how often each cell has ≥1 robot
+        # Initialise the heatmap:
         self.heatmap = {
             (x, y): 0
             for x in range(self.width)
             for y in range(self.height)
         }
         
-        # Pheromone parameters
+        # Pheromone Parameters
+        # Initialise pheromones:
         self.pheromones = {
             (x, y): 0.0
             for x in range(self.width)
             for y in range(self.height)
         }
-        self.pheromone_deposit  = 1.0   # how much each robot leaves per step
-        self.pheromone_evap_rate = 0.05 # fraction to evaporate each tick
-        self.gamma = 0.5  # weight for pheromone attraction in cost
+        self.pheromone_deposit  = 1.0   # How much each robot leaves per tick
+        self.pheromone_evap_rate = 0.05 # Fraction to evaporate each tick
+        self.gamma = 0.5  # Weight for pheromone attraction in cost
         
-        # Testing pheromone efficiency increase:
+        # Assign pheromone field - Efficiency Increase:
         self.pheromone_field = np.zeros((self.width, self.height), dtype = np.float64)
 
         
-        # 1️⃣ Counters for metrics
-        self.total_deliveries = 0        # Amount of total deliveries made
-        self.collisions = 0              # Counter for collisions
-        self.congestion_accum = 0        # Cumulative congestion counter
-        self.ticks = 0                   # Used for averaging
-        self.total_task_steps = 0        # Counter for total steps taken for tasks
+        # Counters for metrics:
+        self.total_deliveries = 0 # Amount of total deliveries made
+        self.collisions = 0 # Counter for collisions
+        self.congestion_accum = 0 # Cumulative congestion counter
+        self.ticks = 0 # Used for averaging
+        self.total_task_steps = 0 # Counter for total steps taken for tasks
         
-        
-        
-
         # DataCollector reporters:
         self.datacollector = DataCollector(
             model_reporters={
@@ -190,8 +188,7 @@ class WarehouseEnvModel(Model):
             }
         )
 
-        # Default static layout
-        # Compute the Y-positions of each shelf row
+        # Compute the Y-positions of each shelf row:
         row_positions = [
             int(round((i+1) * height / (shelf_rows+1)))
             for i in range(shelf_rows)
@@ -206,17 +203,16 @@ class WarehouseEnvModel(Model):
         # Compute the full grid for more efficient path finding calculations later on:
         self.compute_drop_zone_distances()
             
-        # 5️⃣ Initialize items: 1 item per shelf cell:        
+        # Initialize items: 1 item per shelf cell:        
         self.items, self.item_agents = self.create_items(self.shelf_coords)
 
-        # 6️⃣ Build initial task list: (pickup_pos, random_drop_pos)
-        #    One task per item, with drop randomly chosen
+        # Build initial task list - One task per item, with drop randomly chosen:
         self.tasks = self.create_tasks()
 
-        # Shuffle so tasks come in random order
+        # Shuffle tasks so they are in random order:
         self.random.shuffle(self.tasks)
 
-        # 1️⃣ Spawn multiple robots
+        # Spawn multiple robots:
         self.robots = self.spawn_robots(self.num_agents)
 
     def compute_drop_zone_distances(self):
