@@ -1,37 +1,39 @@
 import solara as sl
 from mesa.visualization import SolaraViz, make_space_component, make_plot_component, Slider
 from model import WarehouseEnvModel
-from agent import Shelf, DropZone, WarehouseAgent
 
 def agent_portrayal(agent):
     """
+    Determine visualisation settings for each type of agent in the GUI.
+    
     Colour‐code each agent type:
-      • Shelf          → gray
-      • DropZone       → green
-      • WarehouseAgent → blue
+      - Shelf -> Black
+      - DropZone -> Purple
+      - WarehouseAgent -> Green
+      - ShelfItem -> Orange
     """
     agent_type = agent.__class__.__name__
     if agent_type == "Shelf":
-        color = "black"
+        colour = "black"
         size = 60
     elif agent_type == "DropZone":
-        color = "purple"
+        colour = "purple"
         size = 150
     elif agent_type == "WarehouseAgent":
-        color = "green"
+        colour = "green"
         size = 60
     elif agent_type == "ShelfItem":
-        color = "orange"
+        colour = "orange"
         size = 10
     else:
-        color = "red"  # unexpected proxy type
+        colour = "red"
         size = 60
-    return {"color": color, "size": size}
+    return {"color": colour, "size": size}
 
-# Build the grid‐drawing component once
+# Build the grid‐drawing component once:
 space = make_space_component(agent_portrayal)
 
-# Create a plot component for your metrics
+# Create a plot component for the metrics:
 plot = make_plot_component(
     ["total_deliveries", "collisions", "pendingtasks", "AvgStepsPerDelivery"],
     backend="matplotlib"
@@ -58,7 +60,7 @@ def Page():
     - Renders static shelves/drop‑zones + one moving robot.
     - Use Reset/Step/Play to see the blue WarehouseAgent wander.
     """
-    # 1️⃣ Create the model instance with fixed dims
+    # Create the model instance with various settings:
     model_inst = WarehouseEnvModel(width=20, 
                                    height=15,
                                    shelf_edge_gap = 2,
@@ -68,7 +70,7 @@ def Page():
                                    max_steps = 1000,
                                    search_radius = 3)
 
-    # 2️⃣ Wrap it in Solara’s reactive system
+    # Wrap it in Solara’s reactive system:
     reactive_model = sl.reactive(model_inst)
     
     # Slider Logic:
@@ -93,12 +95,12 @@ def Page():
         }
     }
 
-    # 3️⃣ Pass it positionally to SolaraViz along with your space drawer
+    # Pass it to SolaraViz along with the space drawer:
     return SolaraViz(
-        reactive_model,  # must be an instance so .grid exists
-        [space, plot, ExportButton],         # your grid component
+        reactive_model, 
+        [space, plot, ExportButton],
         model_params = model_params,
         name="Warehouse Layout",
-        play_interval=25 # 0s between steps
+        play_interval=25
     )
 
