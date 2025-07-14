@@ -1,6 +1,8 @@
 # Multi-Agent Warehouse Simulation
 This project simulates autonomous warehouse robots operating in a grid-based environment using various task coordination strategies. Built using the Mesa framework, it allows for interactive visualization, batch experiments, and in-depth performance analysis using statistical tools.
 
+![Simulation Example](images/image.png)
+
 ## Features
 - Simulates autonomous agents (robots) that pick up and deliver shelf items in a warehouse.
 - Supports multiple task assignment strategies:
