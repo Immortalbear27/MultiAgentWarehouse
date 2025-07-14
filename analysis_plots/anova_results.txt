@@ -1,0 +1,4 @@
+                 df    sum_sq   mean_sq           F         PR(>F)
+C(strategy)     2.0  1.256725  0.628363  564.538656  4.673881e-225
+Residual     5898.0  6.564798  0.001113         NaN            NaN
+Eta-squared: 0.161

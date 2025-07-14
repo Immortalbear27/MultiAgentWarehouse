@@ -1,0 +1,8 @@
+     Multiple Comparison of Means - Tukey HSD, FWER=0.05     
+=============================================================
+    group1        group2    meandiff p-adj lower upper reject
+-------------------------------------------------------------
+  centralised decentralised      nan   nan   nan   nan  False
+  centralised         swarm  -0.0348   nan   nan   nan  False
+decentralised         swarm      nan   nan   nan   nan  False
+-------------------------------------------------------------
